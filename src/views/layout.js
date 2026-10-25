@@ -103,6 +103,7 @@ ${appNav ? html`<nav class="appnav" aria-label="App">${appNav.map(([href, label,
   </div>
 </div>
 <script src="/app.js" defer></script>
+<script defer src="https://cdn.vercel-insights.com/v1/script.js"></script>
 </body>
 </html>`;
 }

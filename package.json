@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
+    "@vercel/analytics": "^2.0.1",
     "@vercel/functions": "^2.2.13",
     "express": "^5.1.0"
   }
