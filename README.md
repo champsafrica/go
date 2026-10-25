@@ -96,8 +96,9 @@ All pricing is set by admins under **Pricing** and applies to new bookings. The 
 Go Rides shares the Go Ads identity from [www.goads.co.za](https://www.goads.co.za):
 
 - **Logo:** `public/brand/go-rides-logo.png` keeps the "Go" (with the map-pin "o") from the Go Ads wordmark, and sets "rides" in Fredoka Bold in the same orange with a white outline. The favicon is the Go Ads pin mark, and the app icons are PNG versions of it.
-- **Colours:** Go Ads orange `#ff4d00`, forest `#072014`, mint `#86ffb4`, ink `#0b0b0c` and cream `#faf7f2`. Buttons use a deeper orange, `#c93d00`, so that white text on them passes WCAG AA contrast; `#ff4d00` behind white text does not.
-- **Fonts:** Bricolage Grotesque for headings and Inter for text, the same as the Go Ads site, self-hosted in `public/fonts/` under the SIL Open Font License.
+- **Colours:** Go Ads orange `#ff4d00`, forest `#072014` and mint `#86ffb4` as accents in a black-and-white layout modelled on uber.com. Buttons are black, or white on dark sections, which keeps their text easy to read.
+- **Font:** Poppins throughout, self-hosted in `public/fonts/` under the SIL Open Font License.
+- **Illustrations:** `public/illustrations/` holds flat SVG drawings in the brand colours (car, shared ride, ride pack, business, driving, safety, calendar, route) and the hero route map. Photographs of your own drivers and cars would make the landing page stronger; they can replace any illustration.
 
 ## Deploying to Vercel
 

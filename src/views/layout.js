@@ -12,7 +12,11 @@ const NAV = {
 // The Go mark from the Go Ads logo (www.goads.co.za) with "rides" in place of "ads".
 export const logo = html`<img class="logo" src="/brand/go-rides-logo.png" alt="Go Rides" width="814" height="191">`;
 
-export function layout(req, { title, body, wide = false }) {
+// Links for visitors, to sections of the landing page.
+const PUBLIC_LINKS = [['/#ride', 'Ride'], ['/#share', 'Shared rides'], ['/#drive', 'Drive'], ['/#business', 'Business'], ['/#safety', 'Safety']];
+
+// landing: full-width sections that set their own containers, instead of one column.
+export function layout(req, { title, body, wide = false, landing = false }) {
   const user = req.user;
   const unread = req.unread ?? 0;
   const ok = req.query?.ok, err = req.query?.err;
@@ -27,7 +31,8 @@ export function layout(req, { title, body, wide = false }) {
 <meta name="description" content="Scheduled, subscription-based commuter transport. Your driver. Your schedule. Your ride.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
-<link rel="preload" href="/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/poppins-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/poppins-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/styles.css">
 </head>
@@ -35,22 +40,34 @@ export function layout(req, { title, body, wide = false }) {
 <header class="top">
   <div class="wrap top-inner">
     <a href="${user ? '/home' : '/'}" class="brand">${logo}</a>
+    ${user ? '' : html`<nav class="top-links" aria-label="Go Rides">${PUBLIC_LINKS.map(([href, label]) => html`<a href="${href}">${label}</a>`)}</nav>`}
     ${user ? html`<nav class="top-actions">
       <a href="/notifications" class="bell" aria-label="Notifications">${raw('<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 0 0-5.5-6.84V3.5a1.5 1.5 0 0 0-3 0v.66A7 7 0 0 0 5 11v5l-2 2v1h18v-1Z"/></svg>')}${unread ? html`<span class="badge">${unread}</span>` : ''}</a>
       <form method="post" action="/logout"><input type="hidden" name="_csrf" value="${req.csrf}"><button class="link">Log out</button></form>
-    </nav>` : html`<nav class="top-actions"><a href="/login">Log in</a><a href="/register" class="btn btn-sm">Get started</a></nav>`}
+    </nav>` : html`<nav class="top-actions"><a href="/login">Log in</a><a href="/register" class="btn btn-sm btn-light btn-pill">Sign up</a>
+      <details class="menu"><summary aria-label="Menu">${raw('<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>')}</summary>
+        <div class="menu-panel">${PUBLIC_LINKS.map(([href, label]) => html`<a href="${href}">${label}</a>`)}</div></details></nav>`}
   </div>
   ${links.length ? html`<nav class="tabs"><div class="wrap tabs-inner">${links.map(([href, label]) =>
     html`<a href="${href}" class="${req.path === href ? 'active' : ''}">${label}</a>`)}</div></nav>` : ''}
 </header>
-<main class="wrap ${wide ? 'wide' : ''}">
-  ${req.app.locals.db?.demo ? html`<p class="flash demo" role="note"><strong>Demo:</strong> this site runs on temporary sample data that resets from time to time. Try it with <code>zanele@gorides.test</code> (passenger), <code>thabo@gorides.test</code> (driver) or <code>admin@gorides.test</code>, password <code>gorides123</code>.</p>` : ''}
-  ${ok ? html`<p class="flash ok" role="status">${ok}</p>` : ''}
-  ${err ? html`<p class="flash err" role="alert">${err}</p>` : ''}
+${req.app.locals.db?.demo ? html`<div class="demo-bar" role="note"><div class="wrap ${landing || wide ? 'page' : ''}"><strong>Demo:</strong> sample data that resets from time to time. Log in as <code>zanele@gorides.test</code> (passenger), <code>thabo@gorides.test</code> (driver) or <code>admin@gorides.test</code>, password <code>gorides123</code>.</div></div>` : ''}
+<main class="${landing ? 'landing' : `wrap ${wide ? 'wide' : ''}`}">
+  ${ok || err ? html`<div class="${landing ? 'wrap page' : ''}">
+    ${ok ? html`<p class="flash ok" role="status">${ok}</p>` : ''}
+    ${err ? html`<p class="flash err" role="alert">${err}</p>` : ''}</div>` : ''}
   ${body}
 </main>
-<footer class="foot"><div class="wrap">${logo}<p>Your driver. Your schedule. Your ride.</p>
-  <p>A Go Ads service · <a href="https://www.goads.co.za">www.goads.co.za</a></p></div></footer>
+<footer class="foot"><div class="wrap">
+  <div class="foot-top">${logo}<p class="tagline">Your driver. Your schedule. Your ride.</p></div>
+  <div class="foot-cols">
+    <div><h4>Ride</h4><ul><li><a href="/#ride">How it works</a></li><li><a href="/#prices">Prices</a></li><li><a href="/#share">Shared rides</a></li><li><a href="/#safety">Safety</a></li></ul></div>
+    <div><h4>Work with us</h4><ul><li><a href="/#drive">Drive with Go Rides</a></li><li><a href="/#business">Business accounts</a></li><li><a href="/register?as=driver">Driver sign-up</a></li></ul></div>
+    <div><h4>Your account</h4><ul><li><a href="/login">Log in</a></li><li><a href="/register">Sign up</a></li><li><a href="/register?as=business">Employer sign-up</a></li></ul></div>
+    <div><h4>Go Ads</h4><ul><li><a href="https://www.goads.co.za">www.goads.co.za</a></li></ul></div>
+  </div>
+  <div class="foot-bottom"><span>© ${new Date().getFullYear()} Go Rides, a Go Ads service</span><span>Johannesburg · Pretoria · Cape Town · Durban</span></div>
+</div></footer>
 <script src="/app.js" defer></script>
 </body>
 </html>`;
