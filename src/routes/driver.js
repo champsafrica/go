@@ -1,6 +1,7 @@
 import { html } from '../views/html.js';
 import { layout, csrf, field, tripCard, stars, empty } from '../views/layout.js';
 import { requireRole } from '../auth.js';
+import { getSettings } from '../db.js';
 import { settleTrip, reassignDriverTrips, driverRating, carMates } from '../booking.js';
 import { notify } from '../notify.js';
 import { rand } from '../pricing.js';
@@ -25,15 +26,21 @@ const PASSENGER_MESSAGE = {
 
 export default function driverRoutes(app, db) {
   const only = requireRole('driver');
-  const me = req => db.prepare('SELECT * FROM drivers WHERE user_id = ?').get(req.user.id);
+  const me = async req => await db.prepare('SELECT * FROM drivers WHERE user_id = ?').get(req.user.id);
   const page = (req, res, title, body) => res.send(String(layout(req, { title, body })));
 
   const tripsQuery = where => db.prepare(`SELECT t.*, u.name AS passenger_name, u.phone AS passenger_phone
     FROM trips t JOIN users u ON u.id = t.passenger_id WHERE t.driver_id = ? AND ${where}`);
 
+  // Loads the other passengers in each trip's shared car, for carInfo.
+  const withMates = async trips => {
+    for (const t of trips) t.mates = t.shared && !['completed', 'cancelled', 'no_show'].includes(t.status) ? await carMates(db, t) : [];
+    return trips;
+  };
+
   // For a shared car, show where this pickup falls in the run and who else is on it.
   const carInfo = t => {
-    const mates = t.shared && !['completed', 'cancelled', 'no_show'].includes(t.status) ? carMates(db, t) : [];
+    const mates = t.mates ?? [];
     if (!mates.length) return '';
     const run = [t, ...mates].sort((a, b) => a.pickup_time.localeCompare(b.pickup_time));
     return html`<p class="who"><strong>Shared car: pickup ${run.findIndex(r => r.id === t.id) + 1} of ${run.length}</strong></p>
@@ -49,11 +56,11 @@ export default function driverRoutes(app, db) {
       <select name="minutes" aria-label="Delay">${[5, 10, 15, 20, 30].map(m => html`<option value="${m}">${m} min</option>`)}</select><button class="btn btn-sm btn-ghost">Report delay</button></form>` : ''}
   </div>`;
 
-  app.get('/driver', only, (req, res) => {
-    const d = me(req);
+  app.get('/driver', only, async (req, res) => {
+    const d = await me(req);
     const now = nowLocal();
-    const today = tripsQuery("t.date = ? AND t.status NOT IN ('cancelled') ORDER BY t.pickup_time").all(req.user.id, now.date);
-    const r = driverRating(db, req.user.id);
+    const today = await withMates(await tripsQuery("t.date = ? AND t.status NOT IN ('cancelled') ORDER BY t.pickup_time").all(req.user.id, now.date));
+    const r = await driverRating(db, req.user.id);
     const live = today.some(t => ['en_route', 'arrived', 'in_progress'].includes(t.status));
     page(req, res, 'Today', html`
       ${d.status === 'pending' ? html`<div class="card notice"><strong>Verification in progress.</strong> We are checking your ID, licence and PrDP. You will be notified when you can start taking trips.</div>` : ''}
@@ -66,11 +73,11 @@ export default function driverRoutes(app, db) {
       ${today.length ? today.map(t => tripCard(t, { who: who(t), actions: actions(req, t) })) : empty('No trips today.')}`);
   });
 
-  app.get('/driver/trips', only, (req, res) => {
+  app.get('/driver/trips', only, async (req, res) => {
     const now = nowLocal();
-    const upcoming = tripsQuery("t.date > ? AND t.date <= ? AND t.status = 'scheduled' ORDER BY t.date, t.pickup_time").all(req.user.id, now.date, addDays(now.date, 14));
-    const past = tripsQuery("t.date < ? ORDER BY t.date DESC, t.pickup_time DESC LIMIT 40").all(req.user.id, now.date);
-    const passengers = db.prepare(`SELECT u.name, u.phone, p.home_address, p.work_address, COUNT(*) AS n FROM trips t
+    const upcoming = await withMates(await tripsQuery("t.date > ? AND t.date <= ? AND t.status = 'scheduled' ORDER BY t.date, t.pickup_time").all(req.user.id, now.date, addDays(now.date, 14)));
+    const past = await tripsQuery("t.date < ? ORDER BY t.date DESC, t.pickup_time DESC LIMIT 40").all(req.user.id, now.date);
+    const passengers = await db.prepare(`SELECT u.name, u.phone, p.home_address, p.work_address, COUNT(*) AS n FROM trips t
       JOIN users u ON u.id = t.passenger_id JOIN passengers p ON p.user_id = t.passenger_id
       WHERE t.driver_id = ? AND t.date >= ? AND t.status = 'scheduled' GROUP BY t.passenger_id ORDER BY u.name`).all(req.user.id, now.date);
     page(req, res, 'Trips', html`
@@ -82,36 +89,36 @@ export default function driverRoutes(app, db) {
       ${past.length ? past.map(t => tripCard(t, { who: who(t) })) : empty('No past trips.')}`);
   });
 
-  app.post('/driver/trips/:id/status', only, (req, res) => {
-    const t = db.prepare('SELECT * FROM trips WHERE id = ? AND driver_id = ?').get(Number(req.params.id), req.user.id);
+  app.post('/driver/trips/:id/status', only, async (req, res) => {
+    const t = await db.prepare('SELECT * FROM trips WHERE id = ? AND driver_id = ?').get(Number(req.params.id), req.user.id);
     const to = req.body.status;
     if (!t || !(NEXT[t.status] ?? []).some(([s]) => s === to)) return res.redirect('/driver?err=That update is not possible for this trip.');
-    if (to === 'completed') settleTrip(db, t.id);
-    else db.prepare('UPDATE trips SET status = ? WHERE id = ?').run(to, t.id);
+    if (to === 'completed') await settleTrip(db, t.id);
+    else await db.prepare('UPDATE trips SET status = ? WHERE id = ?').run(to, t.id);
     const msg = PASSENGER_MESSAGE[to];
-    if (msg) notify(db, t.passenger_id, msg[0], msg[1](req.user.name));
+    if (msg) await notify(db, t.passenger_id, msg[0], msg[1](req.user.name));
     res.redirect('/driver');
   });
 
-  app.post('/driver/trips/:id/delay', only, (req, res) => {
+  app.post('/driver/trips/:id/delay', only, async (req, res) => {
     const minutes = Math.min(120, Math.max(0, Number(req.body.minutes) || 0));
-    const t = db.prepare('SELECT * FROM trips WHERE id = ? AND driver_id = ?').get(Number(req.params.id), req.user.id);
+    const t = await db.prepare('SELECT * FROM trips WHERE id = ? AND driver_id = ?').get(Number(req.params.id), req.user.id);
     if (!t) return res.redirect('/driver');
-    db.prepare('UPDATE trips SET delay_minutes = ? WHERE id = ?').run(minutes, t.id);
-    notify(db, t.passenger_id, 'Your driver is running late', `${req.user.name} is running about ${minutes} minutes late for your ${t.pickup_time} pickup. Sorry for the wait.`);
+    await db.prepare('UPDATE trips SET delay_minutes = ? WHERE id = ?').run(minutes, t.id);
+    await notify(db, t.passenger_id, 'Your driver is running late', `${req.user.name} is running about ${minutes} minutes late for your ${t.pickup_time} pickup. Sorry for the wait.`);
     res.redirect('/driver?ok=Passenger notified.');
   });
 
-  app.post('/driver/location', only, (req, res) => {
+  app.post('/driver/location', only, async (req, res) => {
     const lat = Number(req.body.lat), lng = Number(req.body.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return res.status(400).json({ error: 'bad location' });
-    db.prepare("UPDATE drivers SET lat = ?, lng = ?, location_at = datetime('now') WHERE user_id = ?").run(lat, lng, req.user.id);
+    await db.prepare("UPDATE drivers SET lat = ?, lng = ?, location_at = datetime('now') WHERE user_id = ?").run(lat, lng, req.user.id);
     res.json({ ok: true });
   });
 
-  app.get('/driver/availability', only, (req, res) => {
-    const windows = new Map(db.prepare('SELECT * FROM driver_availability WHERE driver_id = ?').all(req.user.id).map(w => [w.weekday, w]));
-    const off = db.prepare('SELECT * FROM driver_time_off WHERE driver_id = ? AND date >= ? ORDER BY date').all(req.user.id, nowLocal().date);
+  app.get('/driver/availability', only, async (req, res) => {
+    const windows = new Map((await db.prepare('SELECT * FROM driver_availability WHERE driver_id = ?').all(req.user.id)).map(w => [w.weekday, w]));
+    const off = await db.prepare('SELECT * FROM driver_time_off WHERE driver_id = ? AND date >= ? ORDER BY date').all(req.user.id, nowLocal().date);
     page(req, res, 'Availability', html`
       <h1>When you can drive</h1>
       <form method="post" action="/driver/availability" class="form card">${csrf(req)}
@@ -129,38 +136,39 @@ export default function driverRoutes(app, db) {
         <form method="post" action="/driver/time-off/${o.date}/delete">${csrf(req)}<button class="link">Remove</button></form></div>`)}`);
   });
 
-  app.post('/driver/availability', only, (req, res) => {
+  app.post('/driver/availability', only, async (req, res) => {
     const b = req.body;
-    db.prepare('DELETE FROM driver_availability WHERE driver_id = ?').run(req.user.id);
+    await db.prepare('DELETE FROM driver_availability WHERE driver_id = ?').run(req.user.id);
     const ins = db.prepare('INSERT INTO driver_availability (driver_id, weekday, start_time, end_time) VALUES (?, ?, ?, ?)');
     for (let d = 1; d <= 7; d++) {
-      if (b[`on_${d}`] && TIME.test(b[`start_${d}`]) && TIME.test(b[`end_${d}`]) && b[`start_${d}`] < b[`end_${d}`]) ins.run(req.user.id, d, b[`start_${d}`], b[`end_${d}`]);
+      if (b[`on_${d}`] && TIME.test(b[`start_${d}`]) && TIME.test(b[`end_${d}`]) && b[`start_${d}`] < b[`end_${d}`]) await ins.run(req.user.id, d, b[`start_${d}`], b[`end_${d}`]);
     }
-    req.app.locals.runBooking();
+    await req.app.locals.runBooking();
     res.redirect('/driver/availability?ok=Availability saved. Trips already booked stay with you unless you book time off.');
   });
 
-  app.post('/driver/time-off', only, (req, res) => {
+  app.post('/driver/time-off', only, async (req, res) => {
     const date = String(req.body.date ?? '');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < nowLocal().date) return res.redirect('/driver/availability?err=Choose a date from today onwards.');
-    db.prepare('INSERT OR REPLACE INTO driver_time_off (driver_id, date, reason) VALUES (?, ?, ?)').run(req.user.id, date, req.body.reason || null);
-    const r = reassignDriverTrips(db, req.user.id, date);
+    await db.prepare('INSERT OR REPLACE INTO driver_time_off (driver_id, date, reason) VALUES (?, ?, ?)').run(req.user.id, date, req.body.reason || null);
+    const r = await reassignDriverTrips(db, req.user.id, date);
     res.redirect(`/driver/availability?ok=${encodeURIComponent(`Time off booked. ${r.moved} trips moved to backup drivers${r.unassigned ? `, ${r.unassigned} waiting for a driver` : ''}.`)}`);
   });
 
-  app.post('/driver/time-off/:date/delete', only, (req, res) => {
-    db.prepare('DELETE FROM driver_time_off WHERE driver_id = ? AND date = ?').run(req.user.id, req.params.date);
+  app.post('/driver/time-off/:date/delete', only, async (req, res) => {
+    await db.prepare('DELETE FROM driver_time_off WHERE driver_id = ? AND date = ?').run(req.user.id, req.params.date);
     res.redirect('/driver/availability?ok=Time off removed.');
   });
 
-  app.get('/driver/earnings', only, (req, res) => {
+  app.get('/driver/earnings', only, async (req, res) => {
     const month = nowLocal().date.slice(0, 7);
-    const sum = db.prepare(`SELECT COUNT(*) AS trips, COALESCE(SUM(driver_payout), 0) AS earned, COALESCE(SUM(fare), 0) AS fares
+    const sum = await db.prepare(`SELECT COUNT(*) AS trips, COALESCE(SUM(driver_payout), 0) AS earned, COALESCE(SUM(fare), 0) AS fares
       FROM trips WHERE driver_id = ? AND status = 'completed' AND substr(date, 1, 7) = ?`).get(req.user.id, month);
-    const byMonth = db.prepare(`SELECT substr(date, 1, 7) AS month, COUNT(*) AS trips, SUM(driver_payout) AS earned FROM trips
+    const byMonth = await db.prepare(`SELECT substr(date, 1, 7) AS month, COUNT(*) AS trips, SUM(driver_payout) AS earned FROM trips
       WHERE driver_id = ? AND status = 'completed' GROUP BY month ORDER BY month DESC LIMIT 12`).all(req.user.id);
-    const reviews = db.prepare('SELECT stars, comment, created_at FROM ratings WHERE ratee_id = ? ORDER BY id DESC LIMIT 10').all(req.user.id);
-    const r = driverRating(db, req.user.id);
+    const reviews = await db.prepare('SELECT stars, comment, created_at FROM ratings WHERE ratee_id = ? ORDER BY id DESC LIMIT 10').all(req.user.id);
+    const r = await driverRating(db, req.user.id);
+    const { commission_pct } = await getSettings(db);
     page(req, res, 'Earnings', html`
       <h1>Earnings</h1>
       <div class="grid-3">
@@ -168,7 +176,7 @@ export default function driverRoutes(app, db) {
         <div class="card stat"><span>Trips completed</span><strong>${sum.trips}</strong></div>
         <div class="card stat"><span>Rating</span><strong>${r.avg ?? '–'}</strong></div>
       </div>
-      <p class="muted">You keep ${100 - Number(db.prepare("SELECT value FROM settings WHERE key = 'commission_pct'").get().value)}% of each fare. Plan trips pay the plan's per-trip value. In a shared car you are paid for every passenger, so a full car earns more than a solo trip.</p>
+      <p class="muted">You keep ${100 - commission_pct}% of each fare. Plan trips pay the plan's per-trip value. In a shared car you are paid for every passenger, so a full car earns more than a solo trip.</p>
       <h2>By month</h2>
       ${byMonth.length ? html`<table class="table"><thead><tr><th>Month</th><th class="num">Trips</th><th class="num">Earned</th></tr></thead><tbody>
         ${byMonth.map(m => html`<tr><td>${m.month}</td><td class="num">${m.trips}</td><td class="num">${rand(m.earned)}</td></tr>`)}</tbody></table>` : empty('No completed trips yet.')}

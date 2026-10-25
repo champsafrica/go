@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createClient } from '@libsql/client';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -237,39 +237,124 @@ export const DEFAULT_PLANS = [
   ['Flexi', 'Two return trips a week, or one-way every weekday.', 18, 5]
 ];
 
-export function openDb(path = process.env.DATABASE_PATH || './data/go-rides.db') {
-  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  db.exec(SCHEMA);
-  for (const [table, column, type] of MIGRATIONS) {
-    if (!db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`).get(column)) {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    }
+// Where the data lives:
+// - TURSO_DATABASE_URL set: a hosted Turso (libSQL) database. Use this in production.
+// - On Vercel without Turso: a throwaway demo database in /tmp, filled with sample data.
+//   Vercel's file system is temporary, so anything saved there can disappear.
+// - Otherwise: a local SQLite file at DATABASE_PATH.
+export function databaseConfig(env = process.env) {
+  if (env.TURSO_DATABASE_URL) return { url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN, demo: false };
+  if (env.VERCEL) return { url: 'file:/tmp/go-rides.db', demo: true };
+  return { url: `file:${env.DATABASE_PATH || './data/go-rides.db'}`, demo: false };
+}
+
+const value = v => (v === undefined ? null : typeof v === 'boolean' ? Number(v) : v);
+
+// A small wrapper that keeps the prepare(sql).get/all/run shape of node:sqlite, with
+// each call returning a promise. Inside db.tx(fn), fn receives a Db bound to the
+// transaction; use that one for every query in the transaction.
+//
+// A local SQLite file fails writes at once ("database is locked") while another
+// connection holds a transaction, so for local files every statement and transaction
+// waits its turn in one queue. Turso queues writes on its server, so it needs no queue.
+export class Db {
+  constructor(conn, { demo = false, inTx = false, root = null, queued = false } = {}) {
+    this.conn = conn;
+    this.demo = demo;
+    this.inTx = inTx;
+    // The Db outside any transaction, for work that outlives one (such as background updates).
+    this.root = root ?? this;
+    this.queued = queued;
+    this.queue = Promise.resolve();
   }
-  const setting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
-  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) setting.run(k, v);
-  if (!db.prepare('SELECT 1 FROM plans LIMIT 1').get()) {
-    const plan = db.prepare('INSERT INTO plans (name, description, trips_per_month, discount_pct) VALUES (?, ?, ?, ?)');
-    for (const p of DEFAULT_PLANS) plan.run(...p);
+
+  #inTurn(fn) {
+    if (!this.queued || this.inTx) return fn();
+    const run = this.queue.then(fn, fn);
+    this.queue = run.catch(() => {});
+    return run;
   }
+
+  async #execute(sql, args) {
+    return this.#inTurn(() => this.conn.execute({ sql, args: args.map(value) }));
+  }
+
+  prepare(sql) {
+    const rows = r => r.rows.map(row => Object.fromEntries(r.columns.map((c, i) => [c, row[i]])));
+    return {
+      get: async (...args) => rows(await this.#execute(sql, args))[0],
+      all: async (...args) => rows(await this.#execute(sql, args)),
+      run: async (...args) => {
+        const r = await this.#execute(sql, args);
+        return { changes: r.rowsAffected, lastInsertRowid: r.lastInsertRowid == null ? null : Number(r.lastInsertRowid) };
+      }
+    };
+  }
+
+  exec(sql) {
+    return this.#inTurn(() => this.conn.executeMultiple(sql));
+  }
+
+  batch(statements) {
+    return this.#inTurn(() => this.conn.batch(statements, 'write'));
+  }
+
+  // Inside fn, use only the Db it is given: on a local file, a query on the outer Db
+  // would wait for this transaction to finish, and so never run.
+  async tx(fn) {
+    if (this.inTx) return fn(this);
+    return this.#inTurn(async () => {
+      const t = await this.conn.transaction('write');
+      try {
+        const result = await fn(new Db(t, { demo: this.demo, inTx: true, root: this }));
+        await t.commit();
+        return result;
+      } catch (err) {
+        await t.rollback().catch(() => {});
+        throw err;
+      } finally {
+        t.close();
+      }
+    });
+  }
+
+  close() {
+    this.conn.close();
+  }
+}
+
+// Returns at once; await db.ready before the first query.
+export function openDb(config = databaseConfig()) {
+  const local = config.url.startsWith('file:');
+  if (local) mkdirSync(dirname(config.url.slice('file:'.length)), { recursive: true });
+  const db = new Db(createClient({ url: config.url, authToken: config.authToken }), { demo: config.demo, queued: local });
+  db.ready = migrate(db, local);
   return db;
 }
 
-export function getSettings(db) {
+async function migrate(db, local) {
+  if (local) await db.exec('PRAGMA journal_mode = WAL;');
+  await db.exec(SCHEMA);
+  for (const [table, column, type] of MIGRATIONS) {
+    if (!await db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`).get(column)) {
+      await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
+  }
+  // last_booking_run is internal (epoch ms of the last booking run), not an admin setting.
+  await db.batch([...Object.entries(DEFAULT_SETTINGS), ['last_booking_run', '0']].map(([k, v]) =>
+    ({ sql: 'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', args: [k, v] })));
+  if (!await db.prepare('SELECT 1 FROM plans LIMIT 1').get()) {
+    await db.batch(DEFAULT_PLANS.map(p =>
+      ({ sql: 'INSERT INTO plans (name, description, trips_per_month, discount_pct) VALUES (?, ?, ?, ?)', args: p })));
+  }
+}
+
+export async function getSettings(db) {
   const out = {};
-  for (const { key, value } of db.prepare('SELECT key, value FROM settings').all()) out[key] = Number(value);
+  for (const { key, value } of await db.prepare('SELECT key, value FROM settings').all()) out[key] = Number(value);
   return out;
 }
 
 export function tx(db, fn) {
-  db.exec('BEGIN');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  return db.tx(fn);
 }

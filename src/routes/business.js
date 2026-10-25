@@ -8,12 +8,12 @@ import { nowLocal } from '../time.js';
 export default function businessRoutes(app, db) {
   const only = requireRole('business');
   const page = (req, res, title, body) => res.send(String(layout(req, { title, body })));
-  const company = req => db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.user.business_id);
+  const company = async req => await db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.user.business_id);
 
-  app.get('/business', only, (req, res) => {
-    const b = company(req);
+  app.get('/business', only, async (req, res) => {
+    const b = await company(req);
     const month = nowLocal().date.slice(0, 7);
-    const staff = db.prepare(`SELECT u.id, u.name, u.email, u.phone, p.zone, p.sponsored,
+    const staff = await db.prepare(`SELECT u.id, u.name, u.email, u.phone, p.zone, p.sponsored,
         (SELECT COUNT(*) FROM trips t WHERE t.passenger_id = u.id AND t.status = 'completed' AND t.payment_source = 'business' AND substr(t.date, 1, 7) = ?) AS trips,
         (SELECT COUNT(*) FROM schedules s WHERE s.passenger_id = u.id AND s.active = 1) AS schedules
       FROM users u JOIN passengers p ON p.user_id = u.id WHERE u.business_id = ? ORDER BY u.name`).all(month, b.id);
@@ -30,33 +30,33 @@ export default function businessRoutes(app, db) {
         : empty('No employees added yet.')}`);
   });
 
-  app.post('/business/employees', only, (req, res) => {
-    const b = company(req);
-    const emp = db.prepare("SELECT u.* FROM users u JOIN passengers p ON p.user_id = u.id WHERE u.email = ?").get(String(req.body.email ?? '').trim().toLowerCase());
+  app.post('/business/employees', only, async (req, res) => {
+    const b = await company(req);
+    const emp = await db.prepare("SELECT u.* FROM users u JOIN passengers p ON p.user_id = u.id WHERE u.email = ?").get(String(req.body.email ?? '').trim().toLowerCase());
     if (!emp) return res.redirect('/business?err=No passenger account with that email. Ask them to sign up first.');
     if (emp.business_id && emp.business_id !== b.id) return res.redirect('/business?err=That person is already linked to another employer.');
-    db.prepare('UPDATE users SET business_id = ? WHERE id = ?').run(b.id, emp.id);
-    db.prepare('UPDATE passengers SET sponsored = 1 WHERE user_id = ?').run(emp.id);
-    notify(db, emp.id, `${b.name} is paying for your rides`, 'Set your weekly schedule in Go Rides and your rides will be booked automatically.');
-    req.app.locals.runBooking();
+    await db.prepare('UPDATE users SET business_id = ? WHERE id = ?').run(b.id, emp.id);
+    await db.prepare('UPDATE passengers SET sponsored = 1 WHERE user_id = ?').run(emp.id);
+    await notify(db, emp.id, `${b.name} is paying for your rides`, 'Set your weekly schedule in Go Rides and your rides will be booked automatically.');
+    await req.app.locals.runBooking();
     res.redirect('/business?ok=Employee added.');
   });
 
-  app.post('/business/employees/:id/remove', only, (req, res) => {
-    const b = company(req);
+  app.post('/business/employees/:id/remove', only, async (req, res) => {
+    const b = await company(req);
     const id = Number(req.params.id);
-    const changed = db.prepare('UPDATE users SET business_id = NULL WHERE id = ? AND business_id = ?').run(id, b.id).changes;
+    const changed = (await db.prepare('UPDATE users SET business_id = NULL WHERE id = ? AND business_id = ?').run(id, b.id)).changes;
     if (changed) {
-      db.prepare('UPDATE passengers SET sponsored = 0 WHERE user_id = ?').run(id);
-      notify(db, id, `${b.name} no longer pays for your rides`, 'Choose a plan or buy a ride pack to keep travelling with Go Rides.');
+      await db.prepare('UPDATE passengers SET sponsored = 0 WHERE user_id = ?').run(id);
+      await notify(db, id, `${b.name} no longer pays for your rides`, 'Choose a plan or buy a ride pack to keep travelling with Go Rides.');
     }
     res.redirect('/business?ok=Employee removed.');
   });
 
-  app.get('/business/report', only, (req, res) => {
-    const b = company(req);
+  app.get('/business/report', only, async (req, res) => {
+    const b = await company(req);
     const month = /^\d{4}-\d{2}$/.test(req.query.month ?? '') ? req.query.month : nowLocal().date.slice(0, 7);
-    const rows = db.prepare(`SELECT u.name, COUNT(t.id) AS trips, COALESCE(SUM(t.fare), 0) AS cost, SUM(t.delay_minutes > 0) AS late
+    const rows = await db.prepare(`SELECT u.name, COUNT(t.id) AS trips, COALESCE(SUM(t.fare), 0) AS cost, SUM(t.delay_minutes > 0) AS late
       FROM trips t JOIN users u ON u.id = t.passenger_id
       WHERE u.business_id = ? AND t.payment_source = 'business' AND t.status = 'completed' AND substr(t.date, 1, 7) = ?
       GROUP BY u.id ORDER BY u.name`).all(b.id, month);

@@ -19,7 +19,7 @@ npm start        # http://localhost:3000
 npm test         # booking, billing and payment tests
 ```
 
-Requires Node 22.5 or newer. The app uses Node's built-in SQLite and Express, and needs no build step.
+Requires Node 22. The app is Express with a SQLite database (through the libSQL client, so the same code runs on a local file or a hosted Turso database), and needs no build step.
 
 ### Demo logins (password `gorides123`)
 
@@ -99,6 +99,26 @@ Go Rides shares the Go Ads identity from [www.goads.co.za](https://www.goads.co.
 - **Colours:** Go Ads orange `#ff4d00`, forest `#072014`, mint `#86ffb4`, ink `#0b0b0c` and cream `#faf7f2`. Buttons use a deeper orange, `#c93d00`, so that white text on them passes WCAG AA contrast; `#ff4d00` behind white text does not.
 - **Fonts:** Bricolage Grotesque for headings and Inter for text, the same as the Go Ads site, self-hosted in `public/fonts/` under the SIL Open Font License.
 
+## Deploying to Vercel
+
+The repository deploys to Vercel as it is. Vercel detects the Express app in `src/server.js` and serves `public/` from its CDN.
+
+**Without a database, Vercel runs a demo.** Vercel's file system is temporary, so with no database connected, Go Rides keeps its data in a throwaway SQLite file, fills it with the sample accounts, and shows a *Demo* banner on every page. Anything saved there can disappear whenever Vercel starts a fresh copy of the app, and separate copies do not share data.
+
+**To keep real data, connect Turso:**
+
+1. In the Vercel project, open **Storage**, choose **Turso** from the Marketplace, create a database (pick a region close to your Vercel functions) and connect it to the project. This adds `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`. If you create the database on turso.tech instead, add those two variables yourself.
+2. Under **Settings > Environment Variables**, add:
+   - `SETUP_CODE`: any long random phrase, used once to create the admin account;
+   - `CRON_SECRET`: another long random phrase, which protects the booking job;
+   - `SITE_URL`: the address people use, if it is not the project's `.vercel.app` address.
+3. Redeploy. The tables are created on the first request.
+4. Open `/setup` on the site, enter the setup code and create your admin account. The page then closes for good. Remove `SETUP_CODE` afterwards.
+
+**Booking runs:** Vercel only runs code while it answers a request. Go Rides books upcoming rides, sends pickup reminders and handles renewals when it is visited (at most every five minutes). `vercel.json` also runs it once a day through Vercel Cron, which is all the Hobby plan allows. Pickup reminders need a run every few minutes even when nobody is browsing, so either use a Pro plan and change the schedule in `vercel.json` to `*/5 * * * *`, or ask a free service such as cron-job.org to call `https://<your site>/api/cron` every five minutes with the header `Authorization: Bearer <CRON_SECRET>`.
+
+**Preview links ask for a Vercel login.** Vercel protects deployment URLs such as `go-xxxx-digitalx1.vercel.app` by default. The project's production domain is public. Change this under **Settings > Deployment Protection**.
+
 ## Before going live
 
 1. **Web address.** Go Rides uses the Go Ads domain for now: set `SITE_URL=https://www.goads.co.za`. The app's pages sit at the root of whatever address serves it (`/login`, `/passenger` and so on), so it cannot run on the same host as the existing Go Ads website. Serve it from a subdomain such as `rides.goads.co.za`, and link to it from www.goads.co.za. Set `SITE_URL` to whichever address it runs on, because trip-sharing links and PayFast callbacks use it.
@@ -106,7 +126,7 @@ Go Rides shares the Go Ads identity from [www.goads.co.za](https://www.goads.co.
 3. **Messaging.** Add WhatsApp Cloud API, Clickatell (SMS) and Resend (email) keys. Without them, messages are recorded in each user's in-app inbox and marked *simulated*. WhatsApp messages sent outside a 24-hour customer window need Meta-approved templates.
 4. **Driver vetting.** The app records ID, licence and PrDP numbers. Before approving a driver, check the originals and run a criminal record check. Confirm operating licence requirements under the National Land Transport Act with a transport attorney.
 5. **POPIA.** Have the privacy notice, consent wording and data retention reviewed. Location is shared only while a trip is under way.
-6. **Hosting.** Run it on any Node host with a persistent disk for `DATABASE_PATH` (for example a small VPS, Render or Fly.io), behind HTTPS, with `NODE_ENV=production` and `SITE_URL` set. Back up the SQLite file daily. Move to PostgreSQL when you run more than one server.
+6. **Hosting and data.** On Vercel, connect Turso as described above; Turso keeps backups and point-in-time restore. On any other Node host, either set the same Turso variables or give `DATABASE_PATH` a persistent disk and back the file up daily.
 7. **Distances and matching.** Passengers enter an estimated distance, and shared rides are matched by home and work area. Add a maps API (such as Google Distance Matrix) to calculate distances from addresses. That would also let sharers be matched by actual detour time instead of area.
 8. **Shared-ride costs.** Sharers pay the shared price even when they ride alone, so watch *Riders per shared car* on the admin overview. At 30% off, a shared car needs more than about 1.4 riders on average before the driver and Go Rides each earn more from it than from a solo ride.
 
@@ -121,12 +141,14 @@ Go Rides shares the Go Ads identity from [www.goads.co.za](https://www.goads.co.
 
 ```
 src/
-  server.js      Express app and five-minute booking loop
-  db.js          SQLite schema, default settings and plans
+  server.js      Express app (Vercel's entry point), cron endpoint and booking trigger
+  db.js          Database connection (local file or Turso), schema, default settings and plans
+  seed.js        Demo accounts and sample history
   booking.js     Trip booking, driver allocation, reminders, billing, renewals
   pricing.js     Fares, plan and pack prices
   payments.js    PayFast checkout and notification handling
   notify.js      In-app, WhatsApp, SMS and email notifications
+  background.js  Work that finishes after the response (Vercel waitUntil)
   routes/        Public, passenger, driver, admin and business pages
   views/         HTML templating and layout
 public/          CSS, small client script (tracking, sharing, location), icon

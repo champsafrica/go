@@ -2,6 +2,8 @@
 // user chose (WhatsApp, SMS, email). A channel without credentials is simulated: the
 // message is logged and recorded as "simulated" so the flow can be tested end to end.
 
+import { background } from './background.js';
+
 const env = process.env;
 
 const providers = {
@@ -45,32 +47,33 @@ export function msisdn(phone) {
   return digits.startsWith('0') ? `27${digits.slice(1)}` : digits;
 }
 
-export function notify(db, userId, title, body) {
-  const user = db.prepare('SELECT id, email, phone, channels FROM users WHERE id = ?').get(userId);
+export async function notify(db, userId, title, body) {
+  const user = await db.prepare('SELECT id, email, phone, channels FROM users WHERE id = ?').get(userId);
   if (!user) return;
-  const { lastInsertRowid } = db.prepare('INSERT INTO notifications (user_id, title, body) VALUES (?, ?, ?)')
+  const { lastInsertRowid } = await db.prepare('INSERT INTO notifications (user_id, title, body) VALUES (?, ?, ?)')
     .run(userId, title, body);
   const channels = user.channels.split(',').filter(c => providers[c]);
   if (env.NODE_ENV === 'test' || channels.length === 0) return;
-  // Delivery is fire-and-forget so a slow provider never blocks a request or a booking run.
-  Promise.all(channels.map(async c => {
+  // Delivery runs in the background so a slow provider never blocks a request or a
+  // booking run. It records the outcome outside any transaction the caller may be in.
+  background(Promise.all(channels.map(async c => {
     try { return `${c}:${await providers[c](user, title, body)}`; }
     catch (err) { return `${c}:error ${err.message}`; }
-  })).then(results => {
-    db.prepare('UPDATE notifications SET deliveries = ? WHERE id = ?').run(results.join(' '), lastInsertRowid);
+  })).then(async results => {
     if (results.some(r => r.endsWith('simulated'))) console.log(`[notify] ${user.email}: ${title} (${results.join(' ')})`);
-  });
+    // A notification made inside a transaction that rolled back no longer exists; that is fine.
+    await db.root.prepare('UPDATE notifications SET deliveries = ? WHERE id = ?').run(results.join(' '), lastInsertRowid);
+  }));
 }
 
-export function notifyAdmins(db, title, body) {
-  for (const { id } of db.prepare("SELECT id FROM users WHERE role = 'admin'").all()) notify(db, id, title, body);
+export async function notifyAdmins(db, title, body) {
+  for (const { id } of await db.prepare("SELECT id FROM users WHERE role = 'admin'").all()) await notify(db, id, title, body);
 }
 
 // For people without a Go Rides account, such as a passenger's emergency contact.
 export function sendDirect(phone, text) {
   const contact = { phone, email: null };
   if (env.NODE_ENV === 'test') return;
-  Promise.all([providers.sms(contact, 'Go Rides', text), providers.whatsapp(contact, 'Go Rides', text)])
-    .then(r => console.log(`[notify] direct to ${phone}: ${r.join(' ')}`))
-    .catch(err => console.error(`[notify] direct to ${phone} failed: ${err.message}`));
+  background(Promise.all([providers.sms(contact, 'Go Rides', text), providers.whatsapp(contact, 'Go Rides', text)])
+    .then(r => console.log(`[notify] direct to ${phone}: ${r.join(' ')}`)));
 }

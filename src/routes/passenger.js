@@ -14,18 +14,17 @@ const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export default function passengerRoutes(app, db) {
   const only = requireRole('passenger');
-  const me = req => db.prepare('SELECT * FROM passengers WHERE user_id = ?').get(req.user.id);
+  const me = async req => await db.prepare('SELECT * FROM passengers WHERE user_id = ?').get(req.user.id);
   const page = (req, res, title, body) => res.send(String(layout(req, { title, body })));
 
-  const approvedDrivers = zone => db.prepare(`SELECT d.*, u.name,
+  const approvedDrivers = async zone => await db.prepare(`SELECT d.*, u.name,
       (SELECT COUNT(*) FROM trips WHERE driver_id = d.user_id AND status = 'completed') AS trips_done
     FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.status = 'approved'
     ORDER BY (d.zone = ?) DESC, u.name`).all(zone);
 
   const sharing = p => Boolean(p.share_rides && p.work_zone);
 
-  const sharingCard = (req, p) => {
-    const { shared_discount_pct: pct } = getSettings(db);
+  const sharingCard = (req, p, pct) => {
     return html`<div class="card ${sharing(p) ? '' : 'share-promo'}"><h3>Shared rides: ${sharing(p) ? 'on' : 'off'}</h3>
       ${sharing(p)
         ? html`<p>You pay ${pct}% less. We match you with neighbours from ${p.zone} who work in ${p.work_zone} and leave at about the same time. You still keep your own pickup time.</p>`
@@ -44,14 +43,15 @@ export default function passengerRoutes(app, db) {
     FROM trips t LEFT JOIN drivers d ON d.user_id = t.driver_id LEFT JOIN users u ON u.id = t.driver_id
     WHERE t.passenger_id = ? AND ${where}`);
 
-  app.get('/passenger', only, (req, res) => {
+  app.get('/passenger', only, async (req, res) => {
     const now = nowLocal();
-    const p = me(req);
-    const next = tripsQuery(`t.status NOT IN ('completed','cancelled','no_show') AND (t.date > ? OR (t.date = ? AND t.pickup_time >= ?) OR t.status IN ('en_route','arrived','in_progress'))
+    const p = await me(req);
+    const { shared_discount_pct: pct } = await getSettings(db);
+    const next = await tripsQuery(`t.status NOT IN ('completed','cancelled','no_show') AND (t.date > ? OR (t.date = ? AND t.pickup_time >= ?) OR t.status IN ('en_route','arrived','in_progress'))
       ORDER BY t.date, t.pickup_time LIMIT 3`).all(req.user.id, now.date, now.date, now.time);
-    const sub = activeSubscription(db, req.user.id, now.date);
-    const hasSchedule = db.prepare('SELECT 1 FROM schedules WHERE passenger_id = ? AND active = 1').get(req.user.id);
-    const balance = walletBalance(db, req.user.id);
+    const sub = await activeSubscription(db, req.user.id, now.date);
+    const hasSchedule = await db.prepare('SELECT 1 FROM schedules WHERE passenger_id = ? AND active = 1').get(req.user.id);
+    const balance = await walletBalance(db, req.user.id);
     page(req, res, 'Home', html`
       <h1>Hi ${req.user.name.split(' ')[0]}</h1>
       <p class="muted">${p.home_address} → ${p.work_address} · <a href="/passenger/profile">Your details</a></p>
@@ -68,25 +68,26 @@ export default function passengerRoutes(app, db) {
           : html`<p>No active plan.</p>`}<a href="/passenger/billing">Plans & payments</a></div>
         <div class="card"><h3>Ride balance</h3><p class="price">${rand(balance)}</p><p class="muted">Used for trips beyond your plan.</p><a href="/passenger/billing#packs">Buy a ride pack</a></div>
       </div>
-      ${sharingCard(req, p)}`);
+      ${sharingCard(req, p, pct)}`);
   });
 
   // Schedules
-  app.get('/passenger/schedule', only, (req, res) => {
-    const p = me(req);
-    const schedules = db.prepare(`SELECT s.*, u.name AS driver_name FROM schedules s LEFT JOIN users u ON u.id = s.preferred_driver_id
+  app.get('/passenger/schedule', only, async (req, res) => {
+    const p = await me(req);
+    const schedules = await db.prepare(`SELECT s.*, u.name AS driver_name FROM schedules s LEFT JOIN users u ON u.id = s.preferred_driver_id
       WHERE s.passenger_id = ? AND s.active = 1`).all(req.user.id);
-    const drivers = approvedDrivers(p.zone);
+    const drivers = await approvedDrivers(p.zone);
+    const { booking_horizon_days, shared_discount_pct: pct } = await getSettings(db);
     page(req, res, 'Schedule', html`
       <h1>Your weekly trips</h1>
-      <p>Rides are booked automatically ${getSettings(db).booking_horizon_days} days ahead.</p>
+      <p>Rides are booked automatically ${booking_horizon_days} days ahead.</p>
       ${schedules.map(s => html`<article class="card">
         <p><strong>${s.weekdays.split(',').map(d => WEEKDAYS[d - 1]).join(', ')}</strong></p>
         <p>${s.morning_time ? html`To work at <strong>${s.morning_time}</strong>` : ''}${s.morning_time && s.evening_time ? ' · ' : ''}${s.evening_time ? html`Home at <strong>${s.evening_time}</strong>` : ''}</p>
         <p class="muted">Preferred driver: ${s.driver_name ?? 'any verified driver'}</p>
         <form method="post" action="/passenger/schedule/${s.id}/delete">${csrf(req)}<button class="link danger" data-confirm="Stop this schedule and cancel its upcoming rides?">Stop this schedule</button></form>
       </article>`)}
-      ${sharingCard(req, p)}
+      ${sharingCard(req, p, pct)}
       <h2>${schedules.length ? 'Add another schedule' : 'Set up your schedule'}</h2>
       <form method="post" action="/passenger/schedule" class="form card">${csrf(req)}
         <fieldset class="field"><legend>Days</legend><div class="checks">${WEEKDAYS.map((d, i) => html`<label class="check"><input type="checkbox" name="weekdays" value="${i + 1}" ${i < 5 ? 'checked' : ''}> ${d}</label>`)}</div></fieldset>
@@ -101,7 +102,7 @@ export default function passengerRoutes(app, db) {
       </form>`);
   });
 
-  app.post('/passenger/schedule', only, (req, res) => {
+  app.post('/passenger/schedule', only, async (req, res) => {
     const days = list(req.body.weekdays).map(Number).filter(d => d >= 1 && d <= 7);
     const morning = TIME.test(req.body.morning_time) ? req.body.morning_time : null;
     const evening = TIME.test(req.body.evening_time) ? req.body.evening_time : null;
@@ -109,38 +110,39 @@ export default function passengerRoutes(app, db) {
     if (!morning && !evening) return res.redirect('/passenger/schedule?err=Add at least one pickup time.');
     if (morning && evening && evening <= morning) return res.redirect('/passenger/schedule?err=Your pickup from work must be after your pickup from home.');
     const driverId = Number(req.body.preferred_driver_id) || null;
-    if (driverId && !db.prepare("SELECT 1 FROM drivers WHERE user_id = ? AND status = 'approved'").get(driverId)) {
+    if (driverId && !await db.prepare("SELECT 1 FROM drivers WHERE user_id = ? AND status = 'approved'").get(driverId)) {
       return res.redirect('/passenger/schedule?err=That driver is not available.');
     }
-    db.prepare('INSERT INTO schedules (passenger_id, weekdays, morning_time, evening_time, preferred_driver_id) VALUES (?, ?, ?, ?, ?)')
+    await db.prepare('INSERT INTO schedules (passenger_id, weekdays, morning_time, evening_time, preferred_driver_id) VALUES (?, ?, ?, ?, ?)')
       .run(req.user.id, [...new Set(days)].sort().join(','), morning, evening, driverId);
-    const result = req.app.locals.runBooking();
+    const result = await req.app.locals.runBooking();
     const msg = result.uncovered ? 'Schedule saved. Choose a plan or buy a ride pack so we can book your rides.' : 'Schedule saved. Your rides are being booked.';
     res.redirect(`/passenger${result.uncovered ? '/billing' : ''}?ok=${encodeURIComponent(msg)}`);
   });
 
-  app.post('/passenger/schedule/:id/delete', only, (req, res) => {
+  app.post('/passenger/schedule/:id/delete', only, async (req, res) => {
     const id = Number(req.params.id);
     const now = nowLocal();
-    tx(db, () => {
-      db.prepare('UPDATE schedules SET active = 0 WHERE id = ? AND passenger_id = ?').run(id, req.user.id);
-      db.prepare(`UPDATE trips SET status = 'cancelled' WHERE schedule_id = ? AND passenger_id = ? AND status IN ('scheduled','unassigned')
+    await tx(db, async db => {
+      await db.prepare('UPDATE schedules SET active = 0 WHERE id = ? AND passenger_id = ?').run(id, req.user.id);
+      await db.prepare(`UPDATE trips SET status = 'cancelled' WHERE schedule_id = ? AND passenger_id = ? AND status IN ('scheduled','unassigned')
         AND (date > ? OR (date = ? AND pickup_time > ?))`).run(id, req.user.id, now.date, now.date, now.time);
     });
     res.redirect('/passenger/schedule?ok=Schedule stopped and upcoming rides cancelled.');
   });
 
   // Drivers: choose a preferred driver and approve backups.
-  app.get('/passenger/drivers', only, (req, res) => {
-    const p = me(req);
-    const drivers = approvedDrivers(p.zone);
-    const backups = new Set(db.prepare('SELECT driver_id FROM backup_drivers WHERE passenger_id = ?').all(req.user.id).map(r => r.driver_id));
-    const preferred = db.prepare('SELECT preferred_driver_id AS id FROM schedules WHERE passenger_id = ? AND active = 1 AND preferred_driver_id IS NOT NULL LIMIT 1').get(req.user.id)?.id;
+  app.get('/passenger/drivers', only, async (req, res) => {
+    const p = await me(req);
+    const drivers = await approvedDrivers(p.zone);
+    const backups = new Set((await db.prepare('SELECT driver_id FROM backup_drivers WHERE passenger_id = ?').all(req.user.id)).map(r => r.driver_id));
+    const preferred = (await db.prepare('SELECT preferred_driver_id AS id FROM schedules WHERE passenger_id = ? AND active = 1 AND preferred_driver_id IS NOT NULL LIMIT 1').get(req.user.id))?.id;
+    for (const d of drivers) d.rating = await driverRating(db, d.user_id);
     page(req, res, 'Drivers', html`
       <h1>Verified drivers</h1>
       <p>Pick a regular driver and the backups you are happy to ride with. If nobody you chose is free, we assign the best-rated verified driver near you.</p>
       ${drivers.length ? html`<div class="grid-2">${drivers.map(d => {
-        const r = driverRating(db, d.user_id);
+        const r = d.rating;
         return html`<article class="card driver">
           <div class="avatar" aria-hidden="true">${d.name.split(' ').map(w => w[0]).slice(0, 2).join('')}</div>
           <div><h3>${d.name} ${d.user_id === preferred ? html`<span class="pill pill-scheduled">Your driver</span>` : ''}</h3>
@@ -153,40 +155,40 @@ export default function passengerRoutes(app, db) {
       })}</div>` : empty('No verified drivers yet in your area. We will assign one as soon as they are approved.')}`);
   });
 
-  app.post('/passenger/drivers/:id/preferred', only, (req, res) => {
+  app.post('/passenger/drivers/:id/preferred', only, async (req, res) => {
     const driverId = Number(req.params.id);
-    if (!db.prepare("SELECT 1 FROM drivers WHERE user_id = ? AND status = 'approved'").get(driverId)) return res.redirect('/passenger/drivers?err=Driver not available.');
-    const updated = db.prepare('UPDATE schedules SET preferred_driver_id = ? WHERE passenger_id = ? AND active = 1').run(driverId, req.user.id).changes;
+    if (!await db.prepare("SELECT 1 FROM drivers WHERE user_id = ? AND status = 'approved'").get(driverId)) return res.redirect('/passenger/drivers?err=Driver not available.');
+    const updated = (await db.prepare('UPDATE schedules SET preferred_driver_id = ? WHERE passenger_id = ? AND active = 1').run(driverId, req.user.id)).changes;
     if (!updated) return res.redirect('/passenger/schedule?err=Set up your schedule first, then choose your driver.');
     // Move upcoming trips to the new driver where they are free.
     const now = nowLocal();
-    const trips = db.prepare(`SELECT id, passenger_id, date, pickup_time, direction, shared FROM trips WHERE passenger_id = ? AND status IN ('scheduled','unassigned')
+    const trips = await db.prepare(`SELECT id, passenger_id, date, pickup_time, direction, shared FROM trips WHERE passenger_id = ? AND status IN ('scheduled','unassigned')
       AND (driver_id IS NULL OR driver_id != ?) AND (date > ? OR (date = ? AND pickup_time > ?))`).all(req.user.id, driverId, now.date, now.date, now.time);
     let moved = 0;
     for (const t of trips) {
-      if (!driverCanTake(db, driverId, t.date, t.pickup_time, t.id, tripPool(db, t))) continue;
-      db.prepare("UPDATE trips SET driver_id = ?, assignment = 'preferred', status = 'scheduled', reminder_sent = 0 WHERE id = ?").run(driverId, t.id);
+      if (!await driverCanTake(db, driverId, t.date, t.pickup_time, t.id, await tripPool(db, t))) continue;
+      await db.prepare("UPDATE trips SET driver_id = ?, assignment = 'preferred', status = 'scheduled', reminder_sent = 0 WHERE id = ?").run(driverId, t.id);
       moved++;
     }
-    if (moved) notify(db, driverId, 'New regular passenger', `${req.user.name} chose you as their regular driver. ${moved} trips added to your schedule.`);
+    if (moved) await notify(db, driverId, 'New regular passenger', `${req.user.name} chose you as their regular driver. ${moved} trips added to your schedule.`);
     res.redirect(`/passenger/drivers?ok=${encodeURIComponent(`Driver updated. ${moved} upcoming rides moved to them.`)}`);
   });
 
-  app.post('/passenger/drivers/:id/backup', only, (req, res) => {
+  app.post('/passenger/drivers/:id/backup', only, async (req, res) => {
     const driverId = Number(req.params.id);
-    const removed = db.prepare('DELETE FROM backup_drivers WHERE passenger_id = ? AND driver_id = ?').run(req.user.id, driverId).changes;
-    if (!removed && db.prepare("SELECT 1 FROM drivers WHERE user_id = ? AND status = 'approved'").get(driverId)) {
-      db.prepare('INSERT INTO backup_drivers (passenger_id, driver_id) VALUES (?, ?)').run(req.user.id, driverId);
+    const removed = (await db.prepare('DELETE FROM backup_drivers WHERE passenger_id = ? AND driver_id = ?').run(req.user.id, driverId)).changes;
+    if (!removed && await db.prepare("SELECT 1 FROM drivers WHERE user_id = ? AND status = 'approved'").get(driverId)) {
+      await db.prepare('INSERT INTO backup_drivers (passenger_id, driver_id) VALUES (?, ?)').run(req.user.id, driverId);
     }
     res.redirect('/passenger/drivers?ok=Backup drivers updated.');
   });
 
   // Trips
-  app.get('/passenger/trips', only, (req, res) => {
+  app.get('/passenger/trips', only, async (req, res) => {
     const now = nowLocal();
-    const upcoming = tripsQuery(`t.status NOT IN ('completed','cancelled','no_show') ORDER BY t.date, t.pickup_time LIMIT 30`).all(req.user.id);
-    const past = tripsQuery(`t.status IN ('completed','cancelled','no_show') ORDER BY t.date DESC, t.pickup_time DESC LIMIT 50`).all(req.user.id);
-    const rated = new Set(db.prepare('SELECT trip_id FROM ratings WHERE rater_id = ?').all(req.user.id).map(r => r.trip_id));
+    const upcoming = await tripsQuery(`t.status NOT IN ('completed','cancelled','no_show') ORDER BY t.date, t.pickup_time LIMIT 30`).all(req.user.id);
+    const past = await tripsQuery(`t.status IN ('completed','cancelled','no_show') ORDER BY t.date DESC, t.pickup_time DESC LIMIT 50`).all(req.user.id);
+    const rated = new Set((await db.prepare('SELECT trip_id FROM ratings WHERE rater_id = ?').all(req.user.id)).map(r => r.trip_id));
     const detail = t => html`<a class="btn btn-sm btn-ghost" href="/passenger/trips/${t.id}">Details</a>`;
     page(req, res, 'Trips', html`
       <h1>Upcoming rides</h1>
@@ -199,10 +201,11 @@ export default function passengerRoutes(app, db) {
         : empty('Your completed rides will show here.')}`);
   });
 
-  app.get('/passenger/trips/:id', only, (req, res) => {
-    const t = tripsQuery('t.id = ?').get(req.user.id, Number(req.params.id));
+  app.get('/passenger/trips/:id', only, async (req, res) => {
+    const t = await tripsQuery('t.id = ?').get(req.user.id, Number(req.params.id));
     if (!t) return res.status(404).send('Trip not found.');
-    const rating = db.prepare('SELECT * FROM ratings WHERE trip_id = ? AND rater_id = ?').get(t.id, req.user.id);
+    const mates = t.shared ? await carMates(db, t) : [];
+    const rating = await db.prepare('SELECT * FROM ratings WHERE trip_id = ? AND rater_id = ?').get(t.id, req.user.id);
     const live = ['scheduled', 'en_route', 'arrived', 'in_progress'].includes(t.status);
     const shareUrl = `${req.app.locals.siteUrl}/t/${t.share_token}`;
     page(req, res, 'Ride', html`
@@ -213,7 +216,6 @@ export default function passengerRoutes(app, db) {
         ${t.delay_minutes ? html`<p class="pill pill-late">Running ${t.delay_minutes} min late</p>` : ''}
         ${driverWho(t)}
         ${t.shared ? (() => {
-          const mates = carMates(db, t);
           return mates.length
             ? html`<p class="who"><span class="pill pill-shared">Shared</span> With ${mates.map(m => m.name.split(' ')[0]).join(', ')} · ${mates.length + 1} passengers, pickups ${[t, ...mates].map(m => m.pickup_time).sort().join(', ')}</p>`
             : html`<p class="who"><span class="pill pill-shared">Shared</span> <span class="muted">Shared-ride price. Nobody else is booked in this car yet.</span></p>`;
@@ -240,54 +242,54 @@ export default function passengerRoutes(app, db) {
           <button class="btn btn-sm btn-ghost">Send to support</button></form></div>`);
   });
 
-  const ownTrip = req => db.prepare('SELECT * FROM trips WHERE id = ? AND passenger_id = ?').get(Number(req.params.id), req.user.id);
+  const ownTrip = async req => await db.prepare('SELECT * FROM trips WHERE id = ? AND passenger_id = ?').get(Number(req.params.id), req.user.id);
 
-  app.post('/passenger/trips/:id/cancel', only, (req, res) => {
-    const t = ownTrip(req);
+  app.post('/passenger/trips/:id/cancel', only, async (req, res) => {
+    const t = await ownTrip(req);
     if (!t || !['scheduled', 'unassigned'].includes(t.status)) return res.redirect('/passenger/trips?err=This ride can no longer be cancelled.');
-    db.prepare("UPDATE trips SET status = 'cancelled' WHERE id = ?").run(t.id);
-    if (t.driver_id) notify(db, t.driver_id, 'Ride cancelled', `${req.user.name} cancelled the ${formatDate(t.date)} ${t.pickup_time} pickup.`);
+    await db.prepare("UPDATE trips SET status = 'cancelled' WHERE id = ?").run(t.id);
+    if (t.driver_id) await notify(db, t.driver_id, 'Ride cancelled', `${req.user.name} cancelled the ${formatDate(t.date)} ${t.pickup_time} pickup.`);
     res.redirect('/passenger/trips?ok=Ride cancelled.');
   });
 
-  app.post('/passenger/trips/:id/rate', only, (req, res) => {
-    const t = ownTrip(req);
+  app.post('/passenger/trips/:id/rate', only, async (req, res) => {
+    const t = await ownTrip(req);
     const n = Number(req.body.stars);
     if (!t || t.status !== 'completed' || !t.driver_id || !(n >= 1 && n <= 5)) return res.redirect('/passenger/trips?err=Could not save rating.');
-    db.prepare('INSERT OR IGNORE INTO ratings (trip_id, rater_id, ratee_id, stars, comment) VALUES (?, ?, ?, ?, ?)')
+    await db.prepare('INSERT OR IGNORE INTO ratings (trip_id, rater_id, ratee_id, stars, comment) VALUES (?, ?, ?, ?, ?)')
       .run(t.id, req.user.id, t.driver_id, n, String(req.body.comment ?? '').slice(0, 500) || null);
     res.redirect(`/passenger/trips/${t.id}?ok=Thanks for rating your ride.`);
   });
 
-  app.post('/passenger/trips/:id/complain', only, (req, res) => {
-    const t = ownTrip(req);
+  app.post('/passenger/trips/:id/complain', only, async (req, res) => {
+    const t = await ownTrip(req);
     const message = String(req.body.message ?? '').trim().slice(0, 2000);
     if (!t || !message) return res.redirect('/passenger/trips?err=Please describe the problem.');
     const category = COMPLAINT_CATEGORIES.includes(req.body.category) ? req.body.category : 'Other';
-    db.prepare('INSERT INTO complaints (user_id, trip_id, category, message) VALUES (?, ?, ?, ?)').run(req.user.id, t.id, category, message);
-    notifyAdmins(db, `Complaint: ${category}`, `${req.user.name} on trip #${t.id}: ${message}`);
+    await db.prepare('INSERT INTO complaints (user_id, trip_id, category, message) VALUES (?, ?, ?, ?)').run(req.user.id, t.id, category, message);
+    await notifyAdmins(db, `Complaint: ${category}`, `${req.user.name} on trip #${t.id}: ${message}`);
     res.redirect(`/passenger/trips/${t.id}?ok=Thanks. Our support team will get back to you.`);
   });
 
-  app.post('/passenger/trips/:id/sos', only, (req, res) => {
-    const t = ownTrip(req);
+  app.post('/passenger/trips/:id/sos', only, async (req, res) => {
+    const t = await ownTrip(req);
     if (!t) return res.status(404).send('Trip not found.');
     const lat = Number(req.body.lat) || null, lng = Number(req.body.lng) || null;
-    db.prepare('INSERT INTO sos_alerts (trip_id, user_id, lat, lng) VALUES (?, ?, ?, ?)').run(t.id, req.user.id, lat, lng);
+    await db.prepare('INSERT INTO sos_alerts (trip_id, user_id, lat, lng) VALUES (?, ?, ?, ?)').run(t.id, req.user.id, lat, lng);
     const where = lat ? ` Location: https://maps.google.com/?q=${lat},${lng}` : '';
-    notifyAdmins(db, 'SOS ALERT', `${req.user.name} (${req.user.phone}) raised an SOS on trip #${t.id} with ${t.driver_id ? describeDriver(db, t.driver_id) : 'no driver'}.${where}`);
-    const p = me(req);
+    await notifyAdmins(db, 'SOS ALERT', `${req.user.name} (${req.user.phone}) raised an SOS on trip #${t.id} with ${t.driver_id ? await describeDriver(db, t.driver_id) : 'no driver'}.${where}`);
+    const p = await me(req);
     if (p.emergency_phone) {
       sendDirect(p.emergency_phone, `Go Rides SOS: ${req.user.name} has asked for help during a ride. Follow it live: ${req.app.locals.siteUrl}/t/${t.share_token}`);
     }
     res.redirect(`/passenger/trips/${t.id}?ok=${encodeURIComponent('Alert sent. Our team is contacting you now. In immediate danger call 10111.')}`);
   });
 
-  app.post('/passenger/sharing', only, (req, res) => {
-    const p = me(req);
+  app.post('/passenger/sharing', only, async (req, res) => {
+    const p = await me(req);
     if (req.body.share_rides && !p.work_zone) return res.redirect('/passenger/profile?err=Add your work area to start sharing.');
-    const r = setSharing(db, req.user.id, Boolean(req.body.share_rides));
-    const { shared_discount_pct: pct } = getSettings(db);
+    const r = await setSharing(db, req.user.id, Boolean(req.body.share_rides));
+    const { shared_discount_pct: pct } = await getSettings(db);
     const msg = r.shared
       ? `Shared rides are on. Your ${r.trips} upcoming rides are now ${pct}% cheaper, and we will match you with neighbours from your next bookings.`
       : `Shared rides are off. Your upcoming rides are back to the solo price${r.moved ? `, and ${r.moved} moved to a driver who can take you alone` : ''}. Plans you have already paid for keep their price.`;
@@ -296,16 +298,16 @@ export default function passengerRoutes(app, db) {
   });
 
   // Plans, ride packs and payments
-  app.get('/passenger/billing', only, (req, res) => {
-    const s = getSettings(db);
-    const p = me(req);
+  app.get('/passenger/billing', only, async (req, res) => {
+    const s = await getSettings(db);
+    const p = await me(req);
     const today = nowLocal().date;
-    const sub = activeSubscription(db, req.user.id, today);
-    const upcomingSub = db.prepare("SELECT s.*, pl.name AS plan_name FROM subscriptions s JOIN plans pl ON pl.id = s.plan_id WHERE s.passenger_id = ? AND s.status = 'active' AND s.period_start > ? ORDER BY s.period_start LIMIT 1").get(req.user.id, today);
-    const plans = db.prepare('SELECT * FROM plans WHERE active = 1 ORDER BY trips_per_month DESC').all();
-    const pending = db.prepare("SELECT * FROM payments WHERE user_id = ? AND status = 'pending' ORDER BY id DESC").all(req.user.id);
-    const ledger = db.prepare('SELECT * FROM wallet_transactions WHERE user_id = ? ORDER BY id DESC LIMIT 20').all(req.user.id);
-    const paid = db.prepare("SELECT * FROM payments WHERE user_id = ? AND status = 'paid' ORDER BY id DESC LIMIT 12").all(req.user.id);
+    const sub = await activeSubscription(db, req.user.id, today);
+    const upcomingSub = await db.prepare("SELECT s.*, pl.name AS plan_name FROM subscriptions s JOIN plans pl ON pl.id = s.plan_id WHERE s.passenger_id = ? AND s.status = 'active' AND s.period_start > ? ORDER BY s.period_start LIMIT 1").get(req.user.id, today);
+    const plans = await db.prepare('SELECT * FROM plans WHERE active = 1 ORDER BY trips_per_month DESC').all();
+    const pending = await db.prepare("SELECT * FROM payments WHERE user_id = ? AND status = 'pending' ORDER BY id DESC").all(req.user.id);
+    const ledger = await db.prepare('SELECT * FROM wallet_transactions WHERE user_id = ? ORDER BY id DESC LIMIT 20').all(req.user.id);
+    const paid = await db.prepare("SELECT * FROM payments WHERE user_id = ? AND status = 'paid' ORDER BY id DESC LIMIT 12").all(req.user.id);
     const shared = sharing(p);
     const fare = tripFare(p.distance_km, s, shared);
     page(req, res, 'Plans & payments', html`
@@ -325,7 +327,7 @@ export default function passengerRoutes(app, db) {
         <p>${pl.trips_per_month} trips · save ${pl.discount_pct}%</p><p class="muted">${pl.description}</p>
         <form method="post" action="/passenger/subscribe">${csrf(req)}<input type="hidden" name="plan_id" value="${pl.id}"><button class="btn btn-sm">${sub ? 'Choose for next month' : 'Subscribe'}</button></form></div>`)}</div>
       <h2 id="packs">Prepaid ride packs</h2>
-      <p class="muted">Credit for trips outside a plan. Your balance: <strong>${rand(walletBalance(db, req.user.id))}</strong></p>
+      <p class="muted">Credit for trips outside a plan. Your balance: <strong>${rand(await walletBalance(db, req.user.id))}</strong></p>
       <div class="grid-3">${RIDE_PACKS.map(pk => html`<div class="card plan"><h3>${pk.rides} rides</h3>
         <p class="price">${rand(packPrice(pk, p.distance_km, s, shared))}</p>${pk.discount_pct ? html`<p>Save ${pk.discount_pct}%</p>` : html`<p>&nbsp;</p>`}
         <form method="post" action="/passenger/topup">${csrf(req)}<input type="hidden" name="rides" value="${pk.rides}"><button class="btn btn-sm btn-ghost">Buy</button></form></div>`)}</div>
@@ -335,43 +337,43 @@ export default function passengerRoutes(app, db) {
       ${paid.length ? html`<table class="table"><tbody>${paid.map(x => html`<tr><td>${x.paid_at?.slice(0, 10)}</td><td>${x.item}</td><td class="num">${rand(x.amount)}</td></tr>`)}</tbody></table>` : empty('No payments yet.')}`);
   });
 
-  app.post('/passenger/subscribe', only, (req, res) => {
-    const plan = db.prepare('SELECT * FROM plans WHERE id = ? AND active = 1').get(Number(req.body.plan_id));
+  app.post('/passenger/subscribe', only, async (req, res) => {
+    const plan = await db.prepare('SELECT * FROM plans WHERE id = ? AND active = 1').get(Number(req.body.plan_id));
     if (!plan) return res.redirect('/passenger/billing?err=Plan not found.');
-    const s = getSettings(db);
-    const p = me(req);
+    const s = await getSettings(db);
+    const p = await me(req);
     const today = nowLocal().date;
     // A new plan starts the day after any current plan ends, so nobody pays twice for the same days.
-    const current = db.prepare("SELECT MAX(period_end) AS end FROM subscriptions WHERE passenger_id = ? AND status = 'active' AND period_end >= ?").get(req.user.id, today).end;
+    const current = (await db.prepare("SELECT MAX(period_end) AS end FROM subscriptions WHERE passenger_id = ? AND status = 'active' AND period_end >= ?").get(req.user.id, today)).end;
     const start = current ? addDays(current, 1) : today;
     const price = planPrice(plan, p.distance_km, s, sharing(p));
-    const paymentId = tx(db, () => {
-      db.prepare("DELETE FROM payments WHERE user_id = ? AND status = 'pending' AND purpose = 'subscription'").run(req.user.id);
-      db.prepare("DELETE FROM subscriptions WHERE passenger_id = ? AND status = 'pending'").run(req.user.id);
-      const subId = db.prepare('INSERT INTO subscriptions (passenger_id, plan_id, price, trips_included, period_start, period_end) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(req.user.id, plan.id, price, plan.trips_per_month, start, addDays(addMonths(start, 1), -1)).lastInsertRowid;
-      return createPayment(db, { userId: req.user.id, amount: price, purpose: 'subscription', subscriptionId: subId, item: `${plan.name} plan` });
+    const paymentId = await tx(db, async db => {
+      await db.prepare("DELETE FROM payments WHERE user_id = ? AND status = 'pending' AND purpose = 'subscription'").run(req.user.id);
+      await db.prepare("DELETE FROM subscriptions WHERE passenger_id = ? AND status = 'pending'").run(req.user.id);
+      const subId = (await db.prepare('INSERT INTO subscriptions (passenger_id, plan_id, price, trips_included, period_start, period_end) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(req.user.id, plan.id, price, plan.trips_per_month, start, addDays(addMonths(start, 1), -1))).lastInsertRowid;
+      return await createPayment(db, { userId: req.user.id, amount: price, purpose: 'subscription', subscriptionId: subId, item: `${plan.name} plan` });
     });
     res.redirect(`/payments/${paymentId}/checkout`);
   });
 
-  app.post('/passenger/subscription/:id/auto-renew', only, (req, res) => {
-    db.prepare('UPDATE subscriptions SET auto_renew = 1 - auto_renew WHERE id = ? AND passenger_id = ?').run(Number(req.params.id), req.user.id);
+  app.post('/passenger/subscription/:id/auto-renew', only, async (req, res) => {
+    await db.prepare('UPDATE subscriptions SET auto_renew = 1 - auto_renew WHERE id = ? AND passenger_id = ?').run(Number(req.params.id), req.user.id);
     res.redirect('/passenger/billing?ok=Auto-renew updated.');
   });
 
-  app.post('/passenger/topup', only, (req, res) => {
+  app.post('/passenger/topup', only, async (req, res) => {
     const pack = RIDE_PACKS.find(pk => pk.rides === Number(req.body.rides));
     if (!pack) return res.redirect('/passenger/billing?err=Pack not found.');
-    const p = me(req);
-    const amount = packPrice(pack, p.distance_km, getSettings(db), sharing(p));
-    const id = createPayment(db, { userId: req.user.id, amount, purpose: 'topup', item: `${pack.rides}-ride pack` });
+    const p = await me(req);
+    const amount = packPrice(pack, p.distance_km, await getSettings(db), sharing(p));
+    const id = await createPayment(db, { userId: req.user.id, amount, purpose: 'topup', item: `${pack.rides}-ride pack` });
     res.redirect(`/payments/${id}/checkout`);
   });
 
   // Profile
-  app.get('/passenger/profile', only, (req, res) => {
-    const p = me(req);
+  app.get('/passenger/profile', only, async (req, res) => {
+    const p = await me(req);
     page(req, res, 'Profile', html`<h1>Your details</h1>
       <form method="post" action="/passenger/profile" class="form card">${csrf(req)}
         ${field('Mobile number', html`<input type="tel" name="phone" required value="${req.user.phone}">`)}
@@ -387,17 +389,17 @@ export default function passengerRoutes(app, db) {
         <button class="btn">Save</button></form>`);
   });
 
-  app.post('/passenger/profile', only, (req, res) => {
+  app.post('/passenger/profile', only, async (req, res) => {
     const b = req.body;
     if (!ZONES.includes(b.zone) || !ZONES.includes(b.work_zone) || !b.home_address?.trim() || !b.work_address?.trim()) return res.redirect('/passenger/profile?err=Please complete all fields.');
     const channels = list(b.channels).filter(c => CHANNELS.some(([v]) => v === c)).join(',') || 'email';
-    tx(db, () => {
-      db.prepare('UPDATE users SET phone = ?, channels = ? WHERE id = ?').run(String(b.phone).trim(), channels, req.user.id);
-      db.prepare('UPDATE passengers SET home_address = ?, work_address = ?, zone = ?, work_zone = ?, distance_km = ?, emergency_name = ?, emergency_phone = ? WHERE user_id = ?')
+    await tx(db, async db => {
+      await db.prepare('UPDATE users SET phone = ?, channels = ? WHERE id = ?').run(String(b.phone).trim(), channels, req.user.id);
+      await db.prepare('UPDATE passengers SET home_address = ?, work_address = ?, zone = ?, work_zone = ?, distance_km = ?, emergency_name = ?, emergency_phone = ? WHERE user_id = ?')
         .run(b.home_address.trim(), b.work_address.trim(), b.zone, b.work_zone, Math.min(80, Math.max(1, Number(b.distance_km) || 10)), b.emergency_name || null, b.emergency_phone || null, req.user.id);
     });
     // Re-check upcoming rides: a new area or a sharing change can break up a shared car.
-    setSharing(db, req.user.id, Boolean(b.share_rides));
+    await setSharing(db, req.user.id, Boolean(b.share_rides));
     res.redirect('/passenger/profile?ok=Details saved.');
   });
 }

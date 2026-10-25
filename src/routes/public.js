@@ -1,5 +1,6 @@
 import { html } from '../views/html.js';
 import { layout, csrf, field, statusPill } from '../views/layout.js';
+import { timingSafeEqual } from 'node:crypto';
 import { hashPassword, verifyPassword, createSession, destroySession, homeFor, requireRole } from '../auth.js';
 import { ZONES, CHANNELS } from '../config.js';
 import { getSettings, tx } from '../db.js';
@@ -19,10 +20,10 @@ export const shareBox = checked => html`<label class="check share-check"><input 
 
 export const list = v => (Array.isArray(v) ? v : v ? [v] : []);
 
-function landing(req, db) {
-  const s = getSettings(db);
+async function landing(req, db) {
+  const s = await getSettings(db);
   const km = Math.min(80, Math.max(1, Number(req.query.km) || 15));
-  const plans = db.prepare('SELECT * FROM plans WHERE active = 1 ORDER BY trips_per_month DESC').all();
+  const plans = await db.prepare('SELECT * FROM plans WHERE active = 1 ORDER BY trips_per_month DESC').all();
   return layout(req, { body: html`
   <section class="hero">
     <p class="eyebrow">Scheduled commuter transport</p>
@@ -112,15 +113,15 @@ function registerPage(req, as, values = {}, error = '') {
 }
 
 export default function publicRoutes(app, db) {
-  app.get('/', (req, res) => res.send(String(landing(req, db))));
-  app.get('/home', requireRole('passenger', 'driver', 'admin', 'business'), (req, res) => res.redirect(homeFor(req.user)));
+  app.get('/', async (req, res) => res.send(String(await landing(req, db))));
+  app.get('/home', requireRole('passenger', 'driver', 'admin', 'business'), async (req, res) => res.redirect(homeFor(req.user)));
 
-  app.get('/register', (req, res) => {
+  app.get('/register', async (req, res) => {
     const as = ['passenger', 'driver', 'business'].includes(req.query.as) ? req.query.as : 'passenger';
     res.send(String(registerPage(req, as)));
   });
 
-  app.post('/register', (req, res) => {
+  app.post('/register', async (req, res) => {
     const b = req.body;
     const as = ['passenger', 'driver', 'business'].includes(b.as) ? b.as : 'passenger';
     const fail = msg => res.status(400).send(String(registerPage(req, as, { ...b, channels: list(b.channels).join(','), share_rides: b.share_rides ? 1 : 0 }, msg)));
@@ -131,36 +132,73 @@ export default function publicRoutes(app, db) {
     if (String(b.password).length < 8) return fail('Your password needs at least 8 characters.');
     if ((as === 'passenger' || as === 'driver') && !ZONES.includes(b.zone)) return fail('Please choose your area.');
     if (as === 'passenger' && !ZONES.includes(b.work_zone)) return fail('Please choose your work area.');
-    if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return fail('There is already an account with that email. Log in instead.');
+    if (await db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return fail('There is already an account with that email. Log in instead.');
     const channels = list(b.channels).filter(c => CHANNELS.some(([v]) => v === c)).join(',') || 'email';
 
-    const userId = tx(db, () => {
+    const userId = await tx(db, async db => {
       let businessId = null;
       if (as === 'business') {
-        businessId = db.prepare('INSERT INTO businesses (name, billing_email) VALUES (?, ?)').run(b.company.trim(), email).lastInsertRowid;
+        businessId = (await db.prepare('INSERT INTO businesses (name, billing_email) VALUES (?, ?)').run(b.company.trim(), email)).lastInsertRowid;
       }
-      const id = Number(db.prepare('INSERT INTO users (role, name, email, phone, password_hash, channels, business_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(as, b.name.trim(), email, b.phone.trim(), hashPassword(b.password), channels, businessId).lastInsertRowid);
+      const id = (await db.prepare('INSERT INTO users (role, name, email, phone, password_hash, channels, business_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(as, b.name.trim(), email, b.phone.trim(), hashPassword(b.password), channels, businessId)).lastInsertRowid;
       if (as === 'passenger') {
-        db.prepare(`INSERT INTO passengers (user_id, home_address, work_address, zone, work_zone, distance_km, share_rides, emergency_name, emergency_phone)
+        await db.prepare(`INSERT INTO passengers (user_id, home_address, work_address, zone, work_zone, distance_km, share_rides, emergency_name, emergency_phone)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, b.home_address.trim(), b.work_address.trim(), b.zone, b.work_zone,
           Math.min(80, Math.max(1, Number(b.distance_km) || 10)), b.share_rides ? 1 : 0, b.emergency_name || null, b.emergency_phone || null);
       } else if (as === 'driver') {
-        db.prepare(`INSERT INTO drivers (user_id, zone, vehicle, vehicle_reg, vehicle_colour, seats, id_number, licence_no, prdp_no)
+        await db.prepare(`INSERT INTO drivers (user_id, zone, vehicle, vehicle_reg, vehicle_colour, seats, id_number, licence_no, prdp_no)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, b.zone, b.vehicle.trim(), b.vehicle_reg.trim().toUpperCase(), b.vehicle_colour || null,
           Math.max(1, Number(b.seats) || 4), b.id_number.trim(), b.licence_no.trim(), b.prdp_no || null);
         // Sensible default: weekdays 05:00 to 20:00. Drivers adjust it on their availability page.
         const avail = db.prepare("INSERT INTO driver_availability (driver_id, weekday, start_time, end_time) VALUES (?, ?, '05:00', '20:00')");
-        for (let d = 1; d <= 5; d++) avail.run(id, d);
+        for (let d = 1; d <= 5; d++) await avail.run(id, d);
       }
       return id;
     });
-    createSession(db, res, userId);
+    await createSession(db, res, userId);
     const next = { passenger: '/passenger/schedule?ok=Welcome to Go Rides! Set up your weekly trips.', driver: '/driver?ok=Thanks for registering. We will verify your documents and let you know.', business: '/business?ok=Your business account is ready. Add your employees.' }[as];
     res.redirect(next);
   });
 
-  app.get('/login', (req, res) => {
+  // One-time creation of the first admin account on a new database. It works only while
+  // no admin exists, and only for someone who knows SETUP_CODE from the host's settings.
+  const setupOpen = async () => Boolean(process.env.SETUP_CODE) && !await db.prepare("SELECT 1 FROM users WHERE role = 'admin'").get();
+  const setupPage = (req, error = '') => layout(req, { title: 'Set up Go Rides', body: html`<section class="narrow">
+    <h1>Create the admin account</h1>
+    <p>This page works once, while Go Rides has no admin. Enter the setup code from your hosting settings.</p>
+    ${error ? html`<p class="flash err">${error}</p>` : ''}
+    <form method="post" action="/setup" class="form">
+      ${field('Setup code', html`<input name="code" required autocomplete="off">`)}
+      ${field('Your name', html`<input name="name" required autocomplete="name">`)}
+      ${field('Email', html`<input type="email" name="email" required autocomplete="email">`)}
+      ${field('Mobile number', html`<input type="tel" name="phone" required autocomplete="tel">`)}
+      ${field('Password', html`<input type="password" name="password" required minlength="10" autocomplete="new-password">`, 'At least 10 characters')}
+      <button class="btn">Create admin account</button>
+    </form></section>` });
+
+  app.get('/setup', async (req, res) => {
+    if (!await setupOpen()) return res.status(404).send(String(layout(req, { title: 'Not found', body: html`<h1>Page not found</h1><p><a href="/">Back to Go Rides</a></p>` })));
+    res.send(String(setupPage(req)));
+  });
+
+  app.post('/setup', async (req, res) => {
+    if (!await setupOpen()) return res.status(404).send('Setup is closed.');
+    const b = req.body;
+    const fail = msg => res.status(400).send(String(setupPage(req, msg)));
+    const given = Buffer.from(String(b.code ?? '')), expected = Buffer.from(process.env.SETUP_CODE);
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return fail('That setup code is not right.');
+    const email = String(b.email ?? '').trim().toLowerCase();
+    if (!b.name?.trim() || !email || !b.phone?.trim()) return fail('Please fill in all the fields.');
+    if (String(b.password ?? '').length < 10) return fail('Your password needs at least 10 characters.');
+    if (await db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return fail('There is already an account with that email.');
+    const { lastInsertRowid } = await db.prepare("INSERT INTO users (role, name, email, phone, password_hash, channels) VALUES ('admin', ?, ?, ?, ?, 'email')")
+      .run(b.name.trim(), email, b.phone.trim(), hashPassword(b.password));
+    await createSession(db, res, lastInsertRowid);
+    res.redirect('/admin?ok=Admin account created. You can now remove SETUP_CODE from your hosting settings.');
+  });
+
+  app.get('/login', async (req, res) => {
     res.send(String(layout(req, { title: 'Log in', body: html`<section class="narrow">
       <h1>Welcome back</h1>
       ${req.query.failed ? html`<p class="flash err">That email and password do not match.</p>` : ''}
@@ -173,21 +211,21 @@ export default function publicRoutes(app, db) {
       <p>New to Go Rides? <a href="/register">Create an account</a></p></section>` })));
   });
 
-  app.post('/login', (req, res) => {
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(req.body.email ?? '').trim().toLowerCase());
+  app.post('/login', async (req, res) => {
+    const user = await db.prepare('SELECT * FROM users WHERE email = ?').get(String(req.body.email ?? '').trim().toLowerCase());
     if (!user || !verifyPassword(String(req.body.password ?? ''), user.password_hash)) {
       return res.redirect(`/login?failed=1${req.body.next ? `&next=${encodeURIComponent(req.body.next)}` : ''}`);
     }
-    createSession(db, res, user.id);
+    await createSession(db, res, user.id);
     const next = String(req.body.next ?? '');
     res.redirect(next.startsWith('/') && !next.startsWith('//') ? next : homeFor(user));
   });
 
-  app.post('/logout', (req, res) => { destroySession(db, req, res); res.redirect('/'); });
+  app.post('/logout', async (req, res) => { await destroySession(db, req, res); res.redirect('/'); });
 
-  app.get('/notifications', requireRole('passenger', 'driver', 'admin', 'business'), (req, res) => {
-    const items = db.prepare('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 100').all(req.user.id);
-    db.prepare("UPDATE notifications SET read_at = datetime('now') WHERE user_id = ? AND read_at IS NULL").run(req.user.id);
+  app.get('/notifications', requireRole('passenger', 'driver', 'admin', 'business'), async (req, res) => {
+    const items = await db.prepare('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 100').all(req.user.id);
+    await db.prepare("UPDATE notifications SET read_at = datetime('now') WHERE user_id = ? AND read_at IS NULL").run(req.user.id);
     res.send(String(layout(req, { title: 'Notifications', body: html`<h1>Notifications</h1>
       ${items.length ? html`<ul class="list">${items.map(n => html`<li class="card ${n.read_at ? '' : 'unread'}">
         <strong>${n.title}</strong><p>${n.body}</p><small class="muted">${n.created_at} UTC${n.deliveries ? ` · ${n.deliveries}` : ''}</small></li>`)}</ul>`
@@ -195,8 +233,8 @@ export default function publicRoutes(app, db) {
   });
 
   // Public, unguessable link a passenger can send to family to follow their ride.
-  app.get('/t/:token', (req, res) => {
-    const t = sharedTrip(db, req.params.token);
+  app.get('/t/:token', async (req, res) => {
+    const t = await sharedTrip(db, req.params.token);
     if (!t) return res.status(404).send('This trip link is not valid.');
     res.send(String(layout(req, { title: 'Live trip', body: html`<section class="narrow">
       <h1>${t.passenger_first} is travelling with Go Rides</h1>
@@ -210,15 +248,15 @@ export default function publicRoutes(app, db) {
       <p class="muted">Worried? Call the Go Rides safety line or SAPS on 10111.</p></section>` })));
   });
 
-  app.get('/api/track/:token', (req, res) => {
-    const t = sharedTrip(db, req.params.token);
+  app.get('/api/track/:token', async (req, res) => {
+    const t = await sharedTrip(db, req.params.token);
     if (!t) return res.status(404).json({ error: 'not found' });
     res.json(trackPayload(t));
   });
 
   // Payments
-  app.get('/payments/:id/checkout', requireRole('passenger'), (req, res) => {
-    const p = db.prepare("SELECT * FROM payments WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.user.id);
+  app.get('/payments/:id/checkout', requireRole('passenger'), async (req, res) => {
+    const p = await db.prepare("SELECT * FROM payments WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.user.id);
     if (!p) return res.status(404).send('Payment not found.');
     if (p.status === 'paid') return res.redirect('/passenger/billing?ok=Already paid.');
     if (payfastEnabled()) {
@@ -235,29 +273,29 @@ export default function publicRoutes(app, db) {
       <p><a href="/passenger/billing">Cancel</a></p></section>` })));
   });
 
-  app.post('/payments/:id/simulate', requireRole('passenger'), (req, res) => {
+  app.post('/payments/:id/simulate', requireRole('passenger'), async (req, res) => {
     if (payfastEnabled()) return res.status(400).send('Simulated payments are switched off.');
-    const p = db.prepare("SELECT * FROM payments WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.user.id);
+    const p = await db.prepare("SELECT * FROM payments WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.user.id);
     if (!p) return res.status(404).send('Payment not found.');
-    markPaid(db, p.id, `SIM-${p.id}`);
-    req.app.locals.runBooking();
+    await markPaid(db, p.id, `SIM-${p.id}`);
+    await req.app.locals.runBooking();
     res.redirect('/passenger/billing?ok=Payment received. Thank you!');
   });
 
-  app.get('/payments/:id/done', requireRole('passenger'), (req, res) => {
+  app.get('/payments/:id/done', requireRole('passenger'), async (req, res) => {
     res.redirect('/passenger/billing?ok=Thanks! Your payment is being confirmed and will show here shortly.');
   });
 
   app.post('/payments/notify', async (req, res) => {
     const result = await handlePayfastNotify(db, req.body);
-    if (result === 'ok') req.app.locals.runBooking();
+    if (result === 'ok') await req.app.locals.runBooking();
     else console.warn(`[payfast] notification rejected: ${result}`);
     res.sendStatus(200);
   });
 }
 
-export function sharedTrip(db, token) {
-  return db.prepare(`SELECT t.*, substr(pu.name, 1, instr(pu.name || ' ', ' ') - 1) AS passenger_first,
+export async function sharedTrip(db, token) {
+  return await db.prepare(`SELECT t.*, substr(pu.name, 1, instr(pu.name || ' ', ' ') - 1) AS passenger_first,
       du.name AS driver_name, d.vehicle, d.vehicle_reg, d.vehicle_colour, d.lat, d.lng, d.location_at
     FROM trips t JOIN users pu ON pu.id = t.passenger_id
     LEFT JOIN drivers d ON d.user_id = t.driver_id LEFT JOIN users du ON du.id = t.driver_id

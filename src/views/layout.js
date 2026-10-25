@@ -14,7 +14,7 @@ export const logo = html`<img class="logo" src="/brand/go-rides-logo.png" alt="G
 
 export function layout(req, { title, body, wide = false }) {
   const user = req.user;
-  const unread = user ? req.app.locals.db.prepare('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_at IS NULL').get(user.id).n : 0;
+  const unread = req.unread ?? 0;
   const ok = req.query?.ok, err = req.query?.err;
   const links = user ? NAV[user.role] : [];
   return html`<!doctype html>
@@ -44,6 +44,7 @@ export function layout(req, { title, body, wide = false }) {
     html`<a href="${href}" class="${req.path === href ? 'active' : ''}">${label}</a>`)}</div></nav>` : ''}
 </header>
 <main class="wrap ${wide ? 'wide' : ''}">
+  ${req.app.locals.db?.demo ? html`<p class="flash demo" role="note"><strong>Demo:</strong> this site runs on temporary sample data that resets from time to time. Try it with <code>zanele@gorides.test</code> (passenger), <code>thabo@gorides.test</code> (driver) or <code>admin@gorides.test</code>, password <code>gorides123</code>.</p>` : ''}
   ${ok ? html`<p class="flash ok" role="status">${ok}</p>` : ''}
   ${err ? html`<p class="flash err" role="alert">${err}</p>` : ''}
   ${body}

@@ -15,19 +15,19 @@ export function verifyPassword(password, stored) {
   return timingSafeEqual(expected, actual);
 }
 
-export function createSession(db, res, userId) {
+export async function createSession(db, res, userId) {
   const id = randomBytes(32).toString('base64url');
   const expires = new Date(Date.now() + SESSION_DAYS * 864e5);
-  db.prepare('INSERT INTO sessions (id, user_id, csrf, expires_at) VALUES (?, ?, ?, ?)')
+  await db.prepare('INSERT INTO sessions (id, user_id, csrf, expires_at) VALUES (?, ?, ?, ?)')
     .run(id, userId, randomBytes(18).toString('base64url'), expires.toISOString());
   res.cookie(COOKIE, id, {
     httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', expires, path: '/'
   });
 }
 
-export function destroySession(db, req, res) {
+export async function destroySession(db, req, res) {
   const id = req.cookies[COOKIE];
-  if (id) db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+  if (id) await db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
   res.clearCookie(COOKIE, { path: '/' });
 }
 
@@ -40,15 +40,19 @@ function parseCookies(header = '') {
   return out;
 }
 
-// Loads req.user and req.csrf, and rejects form posts without a matching CSRF token.
+// Loads req.user, req.csrf and req.unread (unread notifications), and rejects form posts
+// without a matching CSRF token.
 export function sessionMiddleware(db) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     req.cookies = parseCookies(req.headers.cookie);
-    const session = req.cookies[COOKIE] && db.prepare(
+    const session = req.cookies[COOKIE] && await db.prepare(
       "SELECT s.csrf, u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ?"
     ).get(req.cookies[COOKIE], new Date().toISOString());
     req.user = session ? { ...session, csrf: undefined } : null;
     req.csrf = session?.csrf ?? null;
+    req.unread = req.user
+      ? (await db.prepare('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_at IS NULL').get(req.user.id)).n
+      : 0;
     res.locals.user = req.user;
     res.locals.csrf = req.csrf;
     if (req.method === 'POST' && req.user && !req.path.startsWith('/payments/notify')) {

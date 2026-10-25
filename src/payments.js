@@ -10,8 +10,8 @@ const env = process.env;
 export const payfastEnabled = () => Boolean(env.PAYFAST_MERCHANT_ID && env.PAYFAST_MERCHANT_KEY);
 const payfastHost = () => (env.PAYFAST_SANDBOX === 'false' ? 'www.payfast.co.za' : 'sandbox.payfast.co.za');
 
-export function createPayment(db, { userId, amount, purpose, subscriptionId = null, item }) {
-  const { lastInsertRowid } = db.prepare(`INSERT INTO payments (user_id, amount, purpose, subscription_id, item, provider)
+export async function createPayment(db, { userId, amount, purpose, subscriptionId = null, item }) {
+  const { lastInsertRowid } = await db.prepare(`INSERT INTO payments (user_id, amount, purpose, subscription_id, item, provider)
     VALUES (?, ?, ?, ?, ?, ?)`).run(userId, amount, purpose, subscriptionId, item, payfastEnabled() ? 'payfast' : 'simulated');
   return Number(lastInsertRowid);
 }
@@ -54,32 +54,32 @@ export async function handlePayfastNotify(db, body) {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params
   }).then(r => r.text()).catch(() => 'ERROR');
   if (check.trim() !== 'VALID') return 'not validated';
-  const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(Number(body.m_payment_id));
+  const payment = await db.prepare('SELECT * FROM payments WHERE id = ?').get(Number(body.m_payment_id));
   if (!payment) return 'unknown payment';
   if (Math.abs(Number(body.amount_gross) - payment.amount) > 0.01) return 'amount mismatch';
-  if (body.payment_status === 'COMPLETE') markPaid(db, payment.id, body.pf_payment_id);
+  if (body.payment_status === 'COMPLETE') await markPaid(db, payment.id, body.pf_payment_id);
   return 'ok';
 }
 
 // Applies a successful payment: activates the plan or credits the ride balance.
-export function markPaid(db, paymentId, providerRef = null) {
-  return tx(db, () => {
-    const p = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
+export async function markPaid(db, paymentId, providerRef = null) {
+  return tx(db, async db => {
+    const p = await db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
     if (!p || p.status === 'paid') return false;
-    db.prepare("UPDATE payments SET status = 'paid', provider_ref = ?, paid_at = datetime('now') WHERE id = ?")
+    await db.prepare("UPDATE payments SET status = 'paid', provider_ref = ?, paid_at = datetime('now') WHERE id = ?")
       .run(providerRef, paymentId);
     if (p.purpose === 'topup') {
-      db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES (?, ?, 'topup', ?)")
+      await db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES (?, ?, 'topup', ?)")
         .run(p.user_id, p.amount, p.item);
-      notify(db, p.user_id, 'Payment received', `${rand(p.amount)} added to your ride balance.`);
+      await notify(db, p.user_id, 'Payment received', `${rand(p.amount)} added to your ride balance.`);
     } else {
-      const sub = db.prepare('SELECT * FROM subscriptions WHERE id = ?').get(p.subscription_id);
+      const sub = await db.prepare('SELECT * FROM subscriptions WHERE id = ?').get(p.subscription_id);
       const today = nowLocal().date;
       // A plan paid late starts today rather than on its original start date.
       const start = sub.period_start < today ? today : sub.period_start;
-      db.prepare("UPDATE subscriptions SET status = 'active', period_start = ?, period_end = ? WHERE id = ?")
+      await db.prepare("UPDATE subscriptions SET status = 'active', period_start = ?, period_end = ? WHERE id = ?")
         .run(start, addDays(addMonths(start, 1), -1), sub.id);
-      notify(db, p.user_id, 'Plan active', `Payment of ${rand(p.amount)} received. Your plan is active and your rides are being booked.`);
+      await notify(db, p.user_id, 'Plan active', `Payment of ${rand(p.amount)} received. Your plan is active and your rides are being booked.`);
     }
     return true;
   });

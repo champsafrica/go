@@ -79,6 +79,8 @@ small { font-size: .82rem; }
 .flash { padding: 12px 14px; border-radius: 10px; margin: 14px 0 0; font-weight: 600; }
 .flash.ok { background: var(--success-soft); color: var(--success); }
 .flash.err { background: var(--red-soft); color: var(--red); }
+.flash.demo { background: var(--forest); color: #f5f3ee; font-weight: 500; }
+.flash.demo code { color: var(--mint); }
 .narrow { max-width: 480px; margin: 0 auto; }
 .list { list-style: none; padding: 0; }
 .unread { border-left: 4px solid var(--orange); }
