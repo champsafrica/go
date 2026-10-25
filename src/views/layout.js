@@ -5,7 +5,7 @@ import { formatDate } from '../time.js';
 const NAV = {
   passenger: [['/passenger', 'Home'], ['/passenger/schedule', 'Schedule'], ['/passenger/trips', 'Trips'], ['/passenger/billing', 'Plans & pay'], ['/parcels', 'Parcels'], ['/passenger/drivers', 'Drivers']],
   driver: [['/driver', 'Today'], ['/driver/trips', 'Trips'], ['/driver/availability', 'Availability'], ['/driver/earnings', 'Earnings']],
-  admin: [['/admin', 'Overview'], ['/admin/trips', 'Trips'], ['/admin/drivers', 'Drivers'], ['/admin/passengers', 'Passengers'], ['/admin/parcels', 'Parcels'], ['/admin/support', 'Support'], ['/admin/settings', 'Pricing']],
+  admin: [['/admin', 'Overview'], ['/admin/trips', 'Trips'], ['/admin/drivers', 'Drivers'], ['/admin/passengers', 'Passengers'], ['/admin/parcels', 'Parcels'], ['/admin/gift-cards', 'Gift cards'], ['/admin/partnerships', 'Partners'], ['/admin/support', 'Support'], ['/admin/settings', 'Pricing']],
   business: [['/business', 'Employees'], ['/parcels', 'Parcels'], ['/business/report', 'Report']]
 };
 
@@ -33,7 +33,7 @@ const icon = name => raw(`<svg viewBox="0 0 24 24" width="24" height="24" aria-h
 export const logo = html`<img class="logo" src="/brand/go-rides-logo.png" alt="Go Rides" width="814" height="191">`;
 
 // Links for visitors, to sections of the landing page.
-const PUBLIC_LINKS = [['/#pass', 'Go Pass'], ['/#parcels', 'Go Parcels'], ['/#drive', 'Drive'], ['/#business', 'Business'], ['/#safety', 'Safety']];
+const PUBLIC_LINKS = [['/how-it-works', 'How it works'], ['/#pass', 'Go Pass'], ['/#parcels', 'Go Parcels'], ['/#drive', 'Drive'], ['/#business', 'Business']];
 
 // landing: full-width sections that set their own containers, instead of one column.
 export function layout(req, { title, body, wide = false, landing = false }) {
@@ -86,12 +86,12 @@ ${req.app.locals.db?.demo ? html`<div class="demo-bar" role="note"><div class="w
 <footer class="foot"><div class="wrap">
   <div class="foot-top">${logo}<p class="tagline">Your driver. Your schedule. Your ride.</p></div>
   <div class="foot-cols">
-    <div><h4>Ride</h4><ul><li><a href="/#promises">The Go promises</a></li><li><a href="/#pass">Go Pass prices</a></li><li><a href="/#ride">Planned vs on-demand</a></li><li><a href="/#safety">Safety</a></li></ul></div>
+    <div><h4>Ride</h4><ul><li><a href="/how-it-works">How it works</a></li><li><a href="/#promises">The Go promises</a></li><li><a href="/#pass">Go Pass prices</a></li><li><a href="/#ride">Planned vs on-demand</a></li><li><a href="/#safety">Safety</a></li></ul></div>
     <div><h4>Move &amp; earn</h4><ul><li><a href="/#parcels">Go Parcels</a></li><li><a href="/#drive">Drive with Go Rides</a></li><li><a href="/#business">Go for Business</a></li><li><a href="/register?as=driver">Driver sign-up</a></li></ul></div>
     <div><h4>Your account</h4><ul><li><a href="/login">Log in</a></li><li><a href="/register">Sign up</a></li><li><a href="/register?as=business">Employer sign-up</a></li><li><a href="/app">Get the app</a></li></ul></div>
-    <div><h4>Go Ads</h4><ul><li><a href="https://www.goads.co.za">www.goads.co.za</a></li></ul></div>
+    <div><h4>Go Group</h4><ul><li><a href="https://www.goads.co.za">www.goads.co.za</a></li><li><a href="https://www.gorides.co.za">www.gorides.co.za</a></li><li><a href="/gift-cards">Gift Cards</a></li><li><a href="/partnerships">Partnerships</a></li></ul></div>
   </div>
-  <div class="foot-bottom"><span>© ${new Date().getFullYear()} Go Rides, a Go Ads service</span><span>Johannesburg · Pretoria · Cape Town · Durban</span></div>
+  <div class="foot-bottom"><span>© ${new Date().getFullYear()} Go Rides. Managed and Developed by <a href="https://www.digitalxagency.io">Digitalx</a></span><span>Johannesburg · Pretoria · Cape Town · Durban</span></div>
 </div></footer>
 ${appNav ? html`<nav class="appnav" aria-label="App">${appNav.map(([href, label, ic]) =>
   html`<a href="${href}" class="${req.path === href ? 'active' : ''}" ${req.path === href ? html`aria-current="page"` : ''}>${icon(ic)}<span>${label}</span></a>`)}</nav>` : ''}

@@ -45,6 +45,10 @@ Requires Node 22. The app is Express with a SQLite database (through the libSQL 
 | Go Parcels: parcels ride along on scheduled commuter runs, delivered against a code | `/parcels`, `src/parcels.js` |
 | Earnings forecast: drivers see the next 7 days of booked income | Driver → Today and Earnings |
 | Installable web app with bottom navigation and offline screen | `/app`, `public/manifest.webmanifest`, `public/sw.js` |
+| Live arrival detection and measured lateness | `src/location.js`, Driver → Today, Passenger → Your details |
+| Gift cards: buy, pay, deliver by SMS/email, redeem into a ride balance; complimentary cards | `/gift-cards`, Admin → Gift cards, `src/giftcards.js` |
+| Partnerships: application form and admin pipeline | `/partnerships`, Admin → Partners |
+| How it works: the whole system from A to Z, using live settings | `/how-it-works` |
 | Preferred driver and approved backup drivers | Passenger → Drivers |
 | Automatic booking a week ahead, with backup allocation | `src/booking.js` |
 | Monthly plans, prepaid ride packs, renewals and reminders | Passenger → Plans & pay, `src/payments.js` |
@@ -75,7 +79,11 @@ On-demand apps price each trip on the spot, send whichever driver is nearest, an
 
 - **Price Lock.** A Go Pass price is fixed for its month. There is no surge.
 - **Your driver.** The same verified driver every day, with backups you approve.
-- **On-time Promise.** When a driver reports a pickup at least `promise_minutes` late (10 by default), the trip value goes back to the passenger as ride credit (an employer is simply not charged). A booked ride that never gets a driver is cancelled at pickup time and its fare credited. Go Rides carries the cost; the driver is still paid. Lateness is based on the delay the driver reports; using live location to detect it is a natural next step.
+- **On-time Promise, measured by live location.** Lateness is the time between the booked pickup and the driver's recorded arrival, never less than any delay the driver reported. When lateness reaches `promise_minutes` (10 by default), the trip value goes back to the passenger as ride credit (an employer is simply not charged). A booked ride that never gets a driver is cancelled at pickup time and its fare credited. Go Rides carries the cost; the driver is still paid. How arrival is recorded (`src/location.js`):
+  - Pickup addresses are not geocoded, so Go Rides learns each passenger's **pickup points**: from where the driver stood when they first tapped "I have arrived", or from the passenger's phone (*Your details > Pickup points*).
+  - While a trip is under way the driver app sends its location every 10 seconds. Within 150 m of a known pickup point, the trip is marked **arrived automatically** and the passenger is told.
+  - An "I have arrived" tap is **refused** when the driver's location (under 2 minutes old) is more than 500 m from the known pickup point.
+  - Each booking run **warns passengers** once their driver is past the promise limit, and tells the operations team if the driver has not even set off.
 - **Go Parcels: commuter-route logistics.** Drivers already cover the same routes every morning and evening. A parcel from Soweto to Sandton rides on a morning run carrying a Soweto passenger to work in Sandton, or on an evening run the other way. Senders pay a fixed price by size from their ride balance, or on the employer's invoice. The recipient gets a 4-digit code by SMS, and the driver must enter it to complete delivery. Each driver carries at most `parcel_capacity` parcels a day. If a parcel's run is cancelled it moves to another run, and if no run is found by its day it is refunded.
 - **Earnings forecast.** Drivers see the trips and parcels already booked for the next 7 days, and earn extra from parcels on runs they already make.
 
@@ -115,6 +123,13 @@ Go Rides shares the Go Ads identity from [www.goads.co.za](https://www.goads.co.
 - **Look:** the "Go Pass", the commute as a monthly pass, with a dashed route line and numbered stops as the recurring motif. Comparisons on the site name "on-demand apps" rather than competitors, to stay within South Africa's advertising code on comparative claims.
 - **Font:** Poppins throughout, self-hosted in `public/fonts/` under the SIL Open Font License.
 - **Illustrations:** `public/illustrations/` holds flat SVG drawings in the four colours. Photographs of your own drivers and cars can replace any of them.
+
+## Gift cards and partnerships
+
+- **Gift cards** (`/gift-cards`): passengers and employers buy a card from R100 to R5,000 through the normal checkout. Once paid, the buyer sees a code such as `GO-7KQ4-M2XP`, and it is sent to the recipient by SMS and/or email. A passenger redeems it once into their ride balance; codes are forgiving about case and spacing, and repeated failed attempts are slowed down. Gift cards never expire, which meets the Consumer Protection Act's minimum of three years for prepaid vouchers. Admins see every card, the value not yet redeemed (owed as future rides), and can issue complimentary cards or cancel unused ones.
+- **Partnerships** (`/partnerships`): corporate transport, fleet owners and drivers, retail and logistics, schools and campuses, and advertising with Go Ads. Applications (with a hidden anti-spam field and POPIA consent) are stored, admins are notified and the applicant gets a confirmation email; admins move each one through new, contacted, active or declined, with notes.
+
+The footer's **Go Group** column links www.goads.co.za, www.gorides.co.za, Gift Cards and Partnerships, and the site is credited as managed and developed by [Digitalx](https://www.digitalxagency.io).
 
 ## The web app
 

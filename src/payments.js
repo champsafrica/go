@@ -3,6 +3,7 @@ import { addDays, addMonths, nowLocal } from './time.js';
 import { notify } from './notify.js';
 import { rand } from './pricing.js';
 import { tx } from './db.js';
+import { activateGiftCard } from './giftcards.js';
 
 // PayFast is South Africa's most widely used card/EFT gateway. Without merchant
 // credentials the app uses a simulated checkout page so every flow can be tried out.
@@ -33,7 +34,7 @@ export function payfastCheckout(payment, user, siteUrl) {
     merchant_id: env.PAYFAST_MERCHANT_ID,
     merchant_key: env.PAYFAST_MERCHANT_KEY,
     return_url: `${siteUrl}/payments/${payment.id}/done`,
-    cancel_url: `${siteUrl}/passenger/billing`,
+    cancel_url: `${siteUrl}${payment.purpose === 'giftcard' ? '/gift-cards' : '/passenger/billing'}`,
     notify_url: `${siteUrl}/payments/notify`,
     name_first: user.name.split(' ')[0],
     email_address: user.email,
@@ -72,6 +73,8 @@ export async function markPaid(db, paymentId, providerRef = null) {
       await db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES (?, ?, 'topup', ?)")
         .run(p.user_id, p.amount, p.item);
       await notify(db, p.user_id, 'Payment received', `${rand(p.amount)} added to your ride balance.`);
+    } else if (p.purpose === 'giftcard') {
+      await activateGiftCard(db, p.id);
     } else {
       const sub = await db.prepare('SELECT * FROM subscriptions WHERE id = ?').get(p.subscription_id);
       const today = nowLocal().date;

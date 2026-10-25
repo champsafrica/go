@@ -6,6 +6,8 @@ import { openDb, getSettings, tx } from './db.js';
 import { hashPassword } from './auth.js';
 import { runScheduler, token } from './booking.js';
 import { bookParcel } from './parcels.js';
+import { issueGiftCard } from './giftcards.js';
+import { setPickupPoint } from './location.js';
 import { tripFare, driverPayout, planPrice } from './pricing.js';
 import { nowLocal, addDays, addMonths, weekday } from './time.js';
 
@@ -121,6 +123,19 @@ export async function seed(db) {
   });
 
   await runScheduler(db);
+
+  // Pickup points, so live location can record arrivals (Orlando West and Orlando East,
+  // Soweto; Sandton Drive and Rivonia Road, Sandton).
+  const ids = Object.fromEntries((await db.prepare("SELECT email, id FROM users WHERE email IN ('zanele@gorides.test','bongani@gorides.test')").all()).map(r => [r.email, r.id]));
+  await setPickupPoint(db, ids['zanele@gorides.test'], 'home', -26.2386, 27.9078);
+  await setPickupPoint(db, ids['zanele@gorides.test'], 'work', -26.1076, 28.0567);
+  await setPickupPoint(db, ids['bongani@gorides.test'], 'home', -26.2311, 27.9187);
+
+  const admin = await db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
+  await issueGiftCard(db, admin.id, { amount: 300, recipient_name: 'Launch winner', message: 'Welcome to Go Rides' });
+  await db.prepare(`INSERT INTO partnership_requests (type, organisation, contact_name, email, phone, city, message)
+    VALUES ('logistics', 'Kasi Pharmacy Group', 'Ayesha Patel', 'ayesha@kasipharmacy.test', '0110001234', 'Soweto',
+    'We would like to move prescriptions between our Soweto and Sandton branches every morning.')`).run();
 
   // Upcoming parcels on the next weekday's runs.
   let day = addDays(today, 1);

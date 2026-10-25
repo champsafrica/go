@@ -409,3 +409,42 @@ main.landing { padding: 0; }
 .phone-nav { display: flex; justify-content: space-around; padding: 8px 4px 10px; border-top: 1px solid var(--line); }
 .phone-nav span { width: 18px; height: 18px; border-radius: 6px; background: var(--line); }
 .phone-nav span:first-child { background: var(--orange); }
+
+/* Visually hidden, still read by screen readers */
+.sr { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Gift cards */
+.gift-hero { margin: 28px 0 10px; }
+.gift-card { width: min(380px, 100%); aspect-ratio: 1.6; justify-self: center; background: var(--forest); color: #fff; border-radius: 22px; padding: 22px; position: relative; overflow: hidden; display: flex; flex-direction: column; transform: rotate(-3deg); box-shadow: 0 30px 50px -28px rgb(7 32 20 / .8); }
+.gift-card::after { content: ""; position: absolute; right: -50px; top: -50px; width: 150px; height: 150px; border-radius: 50%; border: 20px solid var(--orange); z-index: 0; }
+.gift-card > * { position: relative; z-index: 1; }
+.gc-logo { height: 26px; width: auto; align-self: flex-start; }
+.gc-label { font-size: .7rem; letter-spacing: .16em; color: var(--mint); font-weight: 600; margin-top: 10px; }
+.gc-amount { font-size: clamp(1.8rem, 6vw, 2.3rem); letter-spacing: -.04em; margin-top: auto; }
+.gc-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--mint); letter-spacing: .1em; font-size: .9rem; }
+.amounts { display: flex; flex-wrap: wrap; gap: 8px; }
+.amount { cursor: pointer; }
+.amount input { position: absolute; opacity: 0; }
+.amount span { display: inline-block; padding: 9px 18px; border-radius: 999px; border: 1.5px solid var(--line); font-weight: 600; }
+.amount input:checked + span { background: var(--forest); color: #fff; border-color: var(--forest); }
+.amount input:focus-visible + span { outline: 3px solid var(--orange); outline-offset: 2px; }
+.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+.gift-forms h2 { margin-top: 0; }
+
+/* How it works */
+.guide { display: grid; gap: 32px; margin-top: 24px; }
+@media (min-width: 980px) { .guide { grid-template-columns: 240px 1fr; } .guide-toc { position: sticky; top: 90px; align-self: start; } }
+.guide-toc { background: var(--cream-2); border-radius: 18px; padding: 18px; font-size: .9rem; }
+.guide-toc ol { margin: 10px 0 0; padding-left: 1.3rem; display: grid; gap: 6px; }
+.guide-toc a { text-decoration: none; }
+.guide-toc a:hover { text-decoration: underline; }
+.guide-body { max-width: 760px; }
+.guide-body h1 { font-size: clamp(2rem, 5vw, 2.8rem); font-weight: 800; letter-spacing: -.04em; margin-top: 0; }
+.guide-sec { padding: 26px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 90px; }
+.guide-sec p { margin: .5rem 0; }
+.guide-steps { padding-left: 1.3rem; display: grid; gap: 10px; }
+.guide-steps li::marker { color: var(--orange); font-weight: 700; }
+.faq dt { font-weight: 600; margin-top: 14px; }
+.faq dd { margin: 4px 0 0; color: var(--muted); }
+.partner-types .card h3 { font-size: 1.1rem; }
+.hp { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }

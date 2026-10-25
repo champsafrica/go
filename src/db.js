@@ -2,6 +2,21 @@ import { createClient } from '@libsql/client';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+// Payments are defined once so an older database can be rebuilt to the current
+// definition (SQLite cannot change a CHECK constraint in place).
+const PAYMENTS_COLUMNS = `
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  amount REAL NOT NULL,
+  purpose TEXT NOT NULL CHECK (purpose IN ('subscription','topup','giftcard')),
+  subscription_id INTEGER REFERENCES subscriptions(id),
+  item TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  provider_ref TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid','failed')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  paid_at TEXT`;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
@@ -30,6 +45,7 @@ CREATE TABLE IF NOT EXISTS passengers (
   work_zone TEXT,
   distance_km REAL NOT NULL,
   share_rides INTEGER NOT NULL DEFAULT 0,
+  home_lat REAL, home_lng REAL, work_lat REAL, work_lng REAL,
   emergency_name TEXT,
   emergency_phone TEXT,
   sponsored INTEGER NOT NULL DEFAULT 0
@@ -103,6 +119,8 @@ CREATE TABLE IF NOT EXISTS trips (
   payment_source TEXT CHECK (payment_source IN ('subscription','wallet','business')),
   delay_minutes INTEGER NOT NULL DEFAULT 0,
   promise_credit REAL NOT NULL DEFAULT 0,
+  arrived_at TEXT,
+  late_notified INTEGER NOT NULL DEFAULT 0,
   share_token TEXT NOT NULL UNIQUE,
   reminder_sent INTEGER NOT NULL DEFAULT 0,
   completed_at TEXT,
@@ -146,18 +164,39 @@ CREATE TABLE IF NOT EXISTS wallet_transactions (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS payments (
+CREATE TABLE IF NOT EXISTS payments (${PAYMENTS_COLUMNS}
+);
+
+-- Go Rides gift cards: bought (or issued by an admin) and redeemed into a ride balance.
+CREATE TABLE IF NOT EXISTS gift_cards (
   id INTEGER PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id),
+  code TEXT NOT NULL UNIQUE,
   amount REAL NOT NULL,
-  purpose TEXT NOT NULL CHECK (purpose IN ('subscription','topup')),
-  subscription_id INTEGER REFERENCES subscriptions(id),
-  item TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  provider_ref TEXT,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid','failed')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  paid_at TEXT
+  purchaser_id INTEGER REFERENCES users(id),
+  payment_id INTEGER REFERENCES payments(id),
+  recipient_name TEXT,
+  recipient_email TEXT,
+  recipient_phone TEXT,
+  message TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','active','redeemed','cancelled')),
+  issued_by INTEGER REFERENCES users(id),
+  redeemed_by INTEGER REFERENCES users(id),
+  redeemed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS partnership_requests (
+  id INTEGER PRIMARY KEY,
+  type TEXT NOT NULL,
+  organisation TEXT NOT NULL,
+  contact_name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  city TEXT,
+  message TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','contacted','active','declined')),
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS ratings (
@@ -262,7 +301,14 @@ const MIGRATIONS = [
   ['passengers', 'share_rides', 'INTEGER NOT NULL DEFAULT 0'],
   ['trips', 'shared', 'INTEGER NOT NULL DEFAULT 0'],
   // Ride credit given under the On-time Promise; employers are not charged this amount.
-  ['trips', 'promise_credit', 'REAL NOT NULL DEFAULT 0']
+  ['trips', 'promise_credit', 'REAL NOT NULL DEFAULT 0'],
+  // Live-location arrival: when the driver actually reached the pickup point (ISO, UTC),
+  // and whether the passenger has already been warned that the driver is late.
+  ['trips', 'arrived_at', 'TEXT'],
+  ['trips', 'late_notified', 'INTEGER NOT NULL DEFAULT 0'],
+  // Pickup points learned from drivers' arrivals or set by the passenger's phone.
+  ['passengers', 'home_lat', 'REAL'], ['passengers', 'home_lng', 'REAL'],
+  ['passengers', 'work_lat', 'REAL'], ['passengers', 'work_lng', 'REAL']
 ];
 
 export const DEFAULT_PLANS = [
@@ -373,6 +419,16 @@ async function migrate(db, local) {
     if (!await db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`).get(column)) {
       await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     }
+  }
+  // Databases from before gift cards: rebuild payments so it accepts the 'giftcard' purpose.
+  const { sql } = await db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'payments'").get();
+  if (!sql.includes("'giftcard'")) {
+    await db.batch([
+      { sql: `CREATE TABLE payments_new (${PAYMENTS_COLUMNS})`, args: [] },
+      { sql: 'INSERT INTO payments_new SELECT id, user_id, amount, purpose, subscription_id, item, provider, provider_ref, status, created_at, paid_at FROM payments', args: [] },
+      { sql: 'DROP TABLE payments', args: [] },
+      { sql: 'ALTER TABLE payments_new RENAME TO payments', args: [] }
+    ]);
   }
   // last_booking_run is internal (epoch ms of the last booking run), not an admin setting.
   await db.batch([...Object.entries(DEFAULT_SETTINGS), ['last_booking_run', '0']].map(([k, v]) =>

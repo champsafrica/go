@@ -4,6 +4,7 @@ import { requireRole } from '../auth.js';
 import { getSettings } from '../db.js';
 import { settleTrip, reassignDriverTrips, driverRating, carMates, earningsForecast } from '../booking.js';
 import { driverParcels, collectParcel, deliverParcel } from '../parcels.js';
+import { verifyArrivalTap, markArrived, checkArrival } from '../location.js';
 import { parcelPill } from './parcels.js';
 import { notify } from '../notify.js';
 import { rand } from '../pricing.js';
@@ -21,7 +22,6 @@ const NEXT = {
 
 const PASSENGER_MESSAGE = {
   en_route: ['Driver on the way', d => `${d} is on the way to collect you.`],
-  arrived: ['Your driver has arrived', d => `${d} is waiting at your pickup point.`],
   completed: ['You have arrived', () => 'Thanks for riding with Go Rides. Rate your driver in the app.'],
   no_show: ['Missed pickup', () => 'Your driver marked this pickup as a no-show. Contact support if this is wrong.']
 };
@@ -82,7 +82,7 @@ export default function driverRoutes(app, db) {
       <h1>Today, ${formatDate(now.date)}</h1>
       <p>${stars(r.avg)} <span class="muted">${r.count} ratings · ${d.vehicle} ${d.vehicle_reg}</span></p>
       <div class="card location" data-location="${live ? 'on' : 'off'}" data-endpoint="/driver/location" data-csrf="${req.csrf}">
-        <strong>Live location</strong> <span data-field="loc-status">${live ? 'Sharing with your passenger while a trip is under way.' : 'Shared automatically once you start a trip.'}</span>
+        <strong>Live location</strong> <span data-field="loc-status">${live ? 'Sharing with your passenger while a trip is under way. Arrival at the pickup point is recorded automatically.' : 'Shared automatically once you start a trip, and used to record your arrival on time.'}</span>
       </div>
       <a class="card forecast" href="/driver/earnings"><span>Booked for the next 7 days</span><strong>${rand(forecast.amount)}</strong>
         <small>${forecast.trips} trips${forecast.parcels ? ` and ${forecast.parcels} parcels` : ''}, already on your schedule</small></a>
@@ -122,7 +122,19 @@ export default function driverRoutes(app, db) {
     const t = await db.prepare('SELECT * FROM trips WHERE id = ? AND driver_id = ?').get(Number(req.params.id), req.user.id);
     const to = req.body.status;
     if (!t || !(NEXT[t.status] ?? []).some(([s]) => s === to)) return res.redirect('/driver?err=That update is not possible for this trip.');
+    if (to === 'arrived') {
+      // Checked against the pickup point when live location knows both.
+      const check = await verifyArrivalTap(db, t);
+      if (!check.ok) {
+        const km = (check.distance / 1000).toFixed(1);
+        return res.redirect(`/driver?err=${encodeURIComponent(`Your location shows you are ${km} km from the pickup point. Tap "I have arrived" when you get there.`)}`);
+      }
+      await markArrived(db, t);
+      return res.redirect('/driver');
+    }
     if (to === 'completed') await settleTrip(db, t.id);
+    // Picking up the passenger means the driver arrived, if that was not recorded.
+    else if (to === 'in_progress' && !t.arrived_at) await db.prepare("UPDATE trips SET status = ?, arrived_at = ? WHERE id = ?").run(to, new Date().toISOString(), t.id);
     else await db.prepare('UPDATE trips SET status = ? WHERE id = ?').run(to, t.id);
     const msg = PASSENGER_MESSAGE[to];
     if (msg) await notify(db, t.passenger_id, msg[0], msg[1](req.user.name));
@@ -142,7 +154,9 @@ export default function driverRoutes(app, db) {
     const lat = Number(req.body.lat), lng = Number(req.body.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return res.status(400).json({ error: 'bad location' });
     await db.prepare("UPDATE drivers SET lat = ?, lng = ?, location_at = datetime('now') WHERE user_id = ?").run(lat, lng, req.user.id);
-    res.json({ ok: true });
+    // Live arrival: near a known pickup point, the trip is marked arrived automatically.
+    const arrived = await checkArrival(db, req.user.id, lat, lng);
+    res.json({ ok: true, arrived });
   });
 
   app.get('/driver/availability', only, async (req, res) => {

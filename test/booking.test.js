@@ -9,6 +9,8 @@ const { openDb, getSettings } = await import('../src/db.js');
 const { hashPassword } = await import('../src/auth.js');
 const booking = await import('../src/booking.js');
 const parcels = await import('../src/parcels.js');
+const location = await import('../src/location.js');
+const gift = await import('../src/giftcards.js');
 const { tripFare, planPrice, driverPayout } = await import('../src/pricing.js');
 const { createPayment, markPaid, payfastSignature } = await import('../src/payments.js');
 const { addDays, weekday } = await import('../src/time.js');
@@ -441,4 +443,93 @@ test('drivers see booked trips and parcels in their earnings forecast', async ()
   assert.equal(f.trips, 2);
   assert.equal(f.parcels, 1);
   assert.equal(f.amount, Math.round((payouts + 36) * 100) / 100, 'R45 parcel pays the driver R36');
+});
+
+// ---- Live location for the On-time Promise ----
+
+const SOWETO = { lat: -26.2389, lng: 27.9086 };
+const at = (time, date = MONDAY) => new Date(Date.parse(`${date}T${time}:00+02:00`));
+async function liveTrip() {
+  const d = await driver('Thabo');
+  const p = await passenger('Kagiso');
+  await credit(p, 500);
+  await schedule(p, d, '1', '07:00', null);
+  await booking.generateTrips(db, NOW);
+  const [t] = await trips();
+  await db.prepare("UPDATE trips SET status = 'en_route' WHERE id = ?").run(t.id);
+  return { d, p, t };
+}
+
+test('distance maths: one degree of latitude is about 111 km', () => {
+  const m = location.distanceM({ lat: -26, lng: 28 }, { lat: -25, lng: 28 });
+  assert.ok(Math.abs(m - 111195) < 200);
+});
+
+test('live location marks arrival near a known pickup point, and only there', async () => {
+  const { d, p, t } = await liveTrip();
+  await location.setPickupPoint(db, p, 'home', SOWETO.lat, SOWETO.lng);
+  assert.deepEqual(await location.checkArrival(db, d, SOWETO.lat + 0.01, SOWETO.lng, at('06:55')), [], '1 km away is not arrived');
+  assert.deepEqual(await location.checkArrival(db, d, SOWETO.lat + 0.0008, SOWETO.lng, at('07:12')), [t.id], 'about 90 m away is arrived');
+  const after = (await trips())[0];
+  assert.equal(after.status, 'arrived');
+  assert.equal(location.measuredLateness(after), 12);
+});
+
+test('measured lateness earns the promise credit even if no delay was reported', async () => {
+  const { d, p, t } = await liveTrip();
+  await location.setPickupPoint(db, p, 'home', SOWETO.lat, SOWETO.lng);
+  await location.checkArrival(db, d, SOWETO.lat, SOWETO.lng, at('07:14'));
+  await booking.settleTrip(db, t.id);
+  assert.equal((await trips())[0].delay_minutes, 0, 'driver reported nothing');
+  assert.equal(await booking.walletBalance(db, p), 500, 'fare charged, then credited back');
+});
+
+test('an arrival tap far from the pickup point is refused; an unknown point is learned', async () => {
+  const { d, p, t } = await liveTrip();
+  await db.prepare("UPDATE drivers SET lat = ?, lng = ?, location_at = datetime('now') WHERE user_id = ?").run(SOWETO.lat + 0.05, SOWETO.lng, d);
+  const learned = await location.verifyArrivalTap(db, t);
+  assert.ok(learned.ok, 'no known point yet, so accepted');
+  assert.equal((await db.prepare('SELECT home_lat FROM passengers WHERE user_id = ?').get(p)).home_lat, SOWETO.lat + 0.05, 'and learned');
+  await location.setPickupPoint(db, p, 'home', SOWETO.lat, SOWETO.lng);
+  const far = await location.verifyArrivalTap(db, t);
+  assert.equal(far.ok, false);
+  assert.ok(far.distance > 5000);
+});
+
+test('passengers are warned once when their driver is past the promise limit', async () => {
+  const { p } = await liveTrip();
+  assert.equal(await location.watchLateness(db, at('07:05')), 0);
+  assert.equal(await location.watchLateness(db, at('07:11')), 1);
+  assert.equal(await location.watchLateness(db, at('07:20')), 0, 'only once');
+  assert.ok(await db.prepare("SELECT 1 FROM notifications WHERE user_id = ? AND title = 'Your driver is running late'").get(p));
+});
+
+// ---- Gift cards ----
+
+test('a bought gift card activates on payment and is redeemed once into a ride balance', async () => {
+  const buyer = await passenger('Buyer');
+  const { card, paymentId } = await gift.buyGiftCard(db, { id: buyer }, { amount: 500, recipient_name: 'Thandi' });
+  assert.match(card.code, /^GO-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+  assert.equal(card.status, 'pending');
+  const friend = await passenger('Friend');
+  assert.match((await gift.redeemGiftCard(db, friend, card.code)).error, /not valid/, 'unpaid cards cannot be used');
+  await markPaid(db, paymentId);
+  assert.equal((await db.prepare('SELECT status FROM gift_cards WHERE id = ?').get(card.id)).status, 'active');
+  const typed = card.code.toLowerCase().replace(/-/g, ' ');
+  assert.equal((await gift.redeemGiftCard(db, friend, typed)).amount, 500, 'codes are forgiving about case and spacing');
+  assert.equal(await booking.walletBalance(db, friend), 500);
+  assert.match((await gift.redeemGiftCard(db, buyer, card.code)).error, /already been used/);
+  assert.equal(await booking.walletBalance(db, buyer), 0, 'paying for a gift card does not top up the buyer');
+});
+
+test('admins issue complimentary cards and can cancel unused ones', async () => {
+  const admin = await user('admin', 'Ops');
+  const card = await gift.issueGiftCard(db, admin, { amount: 200, recipient_name: 'Sizwe' });
+  assert.equal(card.status, 'active');
+  assert.ok(await gift.cancelGiftCard(db, card.id));
+  const p = await passenger('Sizwe');
+  assert.match((await gift.redeemGiftCard(db, p, card.code)).error, /not valid/);
+  assert.equal(gift.validAmount(99), false);
+  assert.equal(gift.validAmount(5000), true);
+  assert.equal(gift.validAmount(250.5), false);
 });

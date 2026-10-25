@@ -9,6 +9,7 @@ import { notify, notifyAdmins, sendDirect } from '../notify.js';
 import { nowLocal, addDays, addMonths, WEEKDAYS, formatDate } from '../time.js';
 import { COMPLAINT_CATEGORIES, CHANNELS, ZONES } from '../config.js';
 import { zoneSelect, channelBoxes, shareBox, list } from './public.js';
+import { setPickupPoint, measuredLateness } from '../location.js';
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -223,6 +224,7 @@ export default function passengerRoutes(app, db) {
         ${t.driver_phone && live ? html`<p><a class="btn btn-sm btn-ghost" href="tel:${t.driver_phone}">Call driver</a></p>` : ''}
         ${live ? html`<div class="map" data-field="map"></div><p class="muted" data-field="updated"></p>` : ''}
         <p class="muted">Fare ${rand(t.fare)}${t.payment_source ? ` · paid by ${t.payment_source}` : ''}</p>
+        ${t.arrived_at ? html`<p class="muted">Driver arrived ${new Date(t.arrived_at).toLocaleTimeString('en-ZA', { timeZone: 'Africa/Johannesburg', hour: '2-digit', minute: '2-digit' })}${measuredLateness(t) ? `, ${measuredLateness(t)} min after your booked time` : ', on time'}</p>` : ''}
         ${t.promise_credit ? html`<p class="flash ok">On-time Promise: ${rand(t.promise_credit)} ${t.payment_source === 'business' ? 'not charged to your employer' : 'credited to your ride balance'}.</p>` : ''}
       </div>
       ${live ? html`<div class="card"><h3>Safety</h3>
@@ -388,7 +390,24 @@ export default function passengerRoutes(app, db) {
         ${field('Emergency contact number', html`<input type="tel" name="emergency_phone" value="${p.emergency_phone ?? ''}">`)}
         ${shareBox(sharing(p))}
         ${channelBoxes(req.user.channels)}
-        <button class="btn">Save</button></form>`);
+        <button class="btn">Save</button></form>
+      <div class="card" id="pickup-points"><h3>Pickup points</h3>
+        <p class="muted">Your driver's live location uses these to record exactly when they arrive, which is how the On-time Promise measures lateness. Stand where you wait for your ride and tap the button. We also learn them from your driver's first arrival.</p>
+        <p>Home: <strong>${p.home_lat != null ? 'set' : 'not set yet'}</strong> · Work: <strong>${p.work_lat != null ? 'set' : 'not set yet'}</strong></p>
+        <div class="row"><button type="button" class="btn btn-sm" data-pickup-point="home" data-csrf="${req.csrf}">I am at my home pickup point</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-pickup-point="work" data-csrf="${req.csrf}">I am at my work pickup point</button></div>
+        <p class="muted" data-pickup-status role="status"></p></div>`);
+  });
+
+  app.post('/passenger/pickup-point', only, async (req, res) => {
+    const { which } = req.body;
+    const lat = Number(req.body.lat), lng = Number(req.body.lng), accuracy = Number(req.body.accuracy);
+    if (!['home', 'work'].includes(which) || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      return res.status(400).json({ error: 'That location could not be used.' });
+    }
+    if (accuracy > 200) return res.status(400).json({ error: 'Your location is not precise enough yet. Step outside or wait a moment, then try again.' });
+    await setPickupPoint(db, req.user.id, which, lat, lng);
+    res.json({ message: `Your ${which} pickup point is saved. Refresh to see it.` });
   });
 
   app.post('/passenger/profile', only, async (req, res) => {
@@ -397,6 +416,10 @@ export default function passengerRoutes(app, db) {
     const channels = list(b.channels).filter(c => CHANNELS.some(([v]) => v === c)).join(',') || 'email';
     await tx(db, async db => {
       await db.prepare('UPDATE users SET phone = ?, channels = ? WHERE id = ?').run(String(b.phone).trim(), channels, req.user.id);
+      // A new address means a new pickup point; forget the old one.
+      const before = await db.prepare('SELECT home_address, work_address FROM passengers WHERE user_id = ?').get(req.user.id);
+      if (before.home_address !== b.home_address.trim()) await db.prepare('UPDATE passengers SET home_lat = NULL, home_lng = NULL WHERE user_id = ?').run(req.user.id);
+      if (before.work_address !== b.work_address.trim()) await db.prepare('UPDATE passengers SET work_lat = NULL, work_lng = NULL WHERE user_id = ?').run(req.user.id);
       await db.prepare('UPDATE passengers SET home_address = ?, work_address = ?, zone = ?, work_zone = ?, distance_km = ?, emergency_name = ?, emergency_phone = ? WHERE user_id = ?')
         .run(b.home_address.trim(), b.work_address.trim(), b.zone, b.work_zone, Math.min(80, Math.max(1, Number(b.distance_km) || 10)), b.emergency_name || null, b.emergency_phone || null, req.user.id);
     });

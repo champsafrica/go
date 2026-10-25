@@ -67,11 +67,29 @@ if (loc && navigator.geolocation) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': loc.dataset.csrf },
       body: JSON.stringify({ lat: pos.coords.latitude, lng: pos.coords.longitude })
-    }).then(() => { label.textContent = `Sharing live location (updated ${new Date().toLocaleTimeString('en-ZA')}).`; });
+    }).then(r => r.json()).then(data => {
+      label.textContent = `Sharing live location (updated ${new Date().toLocaleTimeString('en-ZA')}).`;
+      // Live location recorded an arrival: show the next step for that trip.
+      if (data.arrived?.length) location.reload();
+    }).catch(() => {});
   }, () => { label.textContent = 'Allow location access so your passenger can see where you are.'; }, { enableHighAccuracy: true });
 }
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+// Passenger: set a pickup point from where the phone is now.
+document.querySelectorAll('[data-pickup-point]').forEach(btn => btn.addEventListener('click', () => {
+  const out = document.querySelector('[data-pickup-status]');
+  if (!navigator.geolocation) { out.textContent = 'This browser cannot share your location.'; return; }
+  out.textContent = 'Finding your location...';
+  navigator.geolocation.getCurrentPosition(pos => {
+    fetch('/passenger/pickup-point', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': btn.dataset.csrf },
+      body: JSON.stringify({ which: btn.dataset.pickupPoint, lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy })
+    }).then(r => r.json()).then(d => { out.textContent = d.message ?? d.error; });
+  }, () => { out.textContent = 'Allow location access to set your pickup point.'; }, { enableHighAccuracy: true, timeout: 15000 });
+}));
 
 // Installing the web app. Chrome and Edge offer a native prompt (beforeinstallprompt);
 // iPhone Safari has none, so there we explain Share > Add to Home Screen instead.

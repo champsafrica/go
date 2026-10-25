@@ -406,11 +406,14 @@ export default function publicRoutes(app, db) {
     res.json(trackPayload(t));
   });
 
-  // Payments
-  app.get('/payments/:id/checkout', requireRole('passenger'), async (req, res) => {
+  // Payments. Passengers pay for plans and ride packs; passengers and employers buy gift cards.
+  const payer = requireRole('passenger', 'business');
+  const backTo = p => (p.purpose === 'giftcard' ? '/gift-cards' : '/passenger/billing');
+
+  app.get('/payments/:id/checkout', payer, async (req, res) => {
     const p = await db.prepare("SELECT * FROM payments WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.user.id);
     if (!p) return res.status(404).send('Payment not found.');
-    if (p.status === 'paid') return res.redirect('/passenger/billing?ok=Already paid.');
+    if (p.status === 'paid') return res.redirect(`${backTo(p)}?ok=Already paid.`);
     if (payfastEnabled()) {
       const { action, fields } = payfastCheckout(p, req.user, req.app.locals.siteUrl);
       return res.send(String(layout(req, { title: 'Pay', body: html`<section class="narrow"><h1>Pay ${rand(p.amount)}</h1>
@@ -422,20 +425,21 @@ export default function publicRoutes(app, db) {
       <h1>Pay ${rand(p.amount)}</h1><p>${p.item}</p>
       <div class="card notice"><strong>Test checkout.</strong> No payment gateway is connected yet, so this payment is simulated. Add PayFast credentials to take real payments.</div>
       <form method="post" action="/payments/${p.id}/simulate" class="form">${csrf(req)}<button class="btn">Pay ${rand(p.amount)}</button></form>
-      <p><a href="/passenger/billing">Cancel</a></p></section>` })));
+      <p><a href="${backTo(p)}">Cancel</a></p></section>` })));
   });
 
-  app.post('/payments/:id/simulate', requireRole('passenger'), async (req, res) => {
+  app.post('/payments/:id/simulate', payer, async (req, res) => {
     if (payfastEnabled()) return res.status(400).send('Simulated payments are switched off.');
     const p = await db.prepare("SELECT * FROM payments WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.user.id);
     if (!p) return res.status(404).send('Payment not found.');
     await markPaid(db, p.id, `SIM-${p.id}`);
-    await req.app.locals.runBooking();
-    res.redirect('/passenger/billing?ok=Payment received. Thank you!');
+    if (p.purpose !== 'giftcard') await req.app.locals.runBooking();
+    res.redirect(`${backTo(p)}?ok=${encodeURIComponent(p.purpose === 'giftcard' ? 'Payment received. Your gift card is ready below.' : 'Payment received. Thank you!')}`);
   });
 
-  app.get('/payments/:id/done', requireRole('passenger'), async (req, res) => {
-    res.redirect('/passenger/billing?ok=Thanks! Your payment is being confirmed and will show here shortly.');
+  app.get('/payments/:id/done', payer, async (req, res) => {
+    const p = await db.prepare('SELECT purpose FROM payments WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
+    res.redirect(`${p ? backTo(p) : '/home'}?ok=Thanks! Your payment is being confirmed and will show here shortly.`);
   });
 
   app.post('/payments/notify', async (req, res) => {

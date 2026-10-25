@@ -77,3 +77,10 @@ export function sendDirect(phone, text) {
   background(Promise.all([providers.sms(contact, 'Go Rides', text), providers.whatsapp(contact, 'Go Rides', text)])
     .then(r => console.log(`[notify] direct to ${phone}: ${r.join(' ')}`)));
 }
+
+// Email to someone without a Go Rides account, such as a gift card recipient.
+export function sendDirectEmail(email, subject, text) {
+  if (env.NODE_ENV === 'test') return;
+  background(providers.email({ email, phone: null }, subject, text)
+    .then(r => console.log(`[notify] email to ${email}: ${r}`)));
+}

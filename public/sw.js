@@ -1,7 +1,7 @@
 // Go Rides service worker. Pages always load live because ride details change; the app
 // shell (styles, script, fonts, logo, illustrations) is cached so the app opens fast, and
 // an offline screen shows when there is no connection.
-const CACHE = 'go-rides-v5';
+const CACHE = 'go-rides-v6';
 const SHELL = [
   '/offline.html', '/styles.css', '/app.js', '/favicon.svg', '/brand/go-rides-logo.png', '/brand/icon-192.png',
   '/fonts/poppins-latin-400-normal.woff2', '/fonts/poppins-latin-500-normal.woff2', '/fonts/poppins-latin-600-normal.woff2',

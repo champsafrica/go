@@ -4,6 +4,7 @@ import { tripFare, driverPayout, subscriptionTripValue, round2, rand } from './p
 import { notify, notifyAdmins } from './notify.js';
 import { nowLocal, addDays, addMonths, weekday, toMinutes, formatDate } from './time.js';
 import { runParcels } from './parcels.js';
+import { effectiveDelay, watchLateness } from './location.js';
 
 // A driver is busy if another of their trips starts within this many minutes.
 export const TRIP_BUFFER_MINUTES = 60;
@@ -309,17 +310,20 @@ export async function settleTrip(db, tripId) {
     }
     await db.prepare("UPDATE trips SET status = 'completed', payment_source = ?, driver_payout = ?, completed_at = datetime('now') WHERE id = ?")
       .run(source, round2(payout), t.id);
-    // On-time Promise: a late pickup is credited back. Go Rides carries the cost; the
-    // driver is still paid. Employers are simply not charged for the trip.
-    if (t.delay_minutes >= s.promise_minutes) {
+    // On-time Promise: a late pickup is credited back. Lateness is measured from the
+    // driver's arrival (live location or their arrival tap), and never counts as less than
+    // the delay they reported. Go Rides carries the cost; the driver is still paid.
+    // Employers are simply not charged for the trip.
+    const late = effectiveDelay(t);
+    if (late >= s.promise_minutes) {
       const value = round2(source === 'subscription' ? subscriptionTripValue(sub) : t.fare);
       await db.prepare('UPDATE trips SET promise_credit = ? WHERE id = ?').run(value, t.id);
       if (source === 'business') {
-        await notify(db, t.passenger_id, 'On-time Promise', `Your driver was ${t.delay_minutes} minutes late, so your employer is not charged for this ride.`);
+        await notify(db, t.passenger_id, 'On-time Promise', `Your driver was ${late} minutes late, so your employer is not charged for this ride.`);
       } else {
         await db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, trip_id, description) VALUES (?, ?, 'refund', ?, ?)")
-          .run(t.passenger_id, value, t.id, `On-time Promise: ${t.delay_minutes} min late on ${t.date}`);
-        await notify(db, t.passenger_id, 'On-time Promise', `Your driver was ${t.delay_minutes} minutes late. We have added ${rand(value)} ride credit to your balance.`);
+          .run(t.passenger_id, value, t.id, `On-time Promise: ${late} min late on ${t.date}`);
+        await notify(db, t.passenger_id, 'On-time Promise', `Your driver was ${late} minutes late. We have added ${rand(value)} ride credit to your balance.`);
       }
     }
     if (source === 'wallet') {
@@ -388,7 +392,8 @@ export async function runScheduler(db, now = nowLocal(), createPayment) {
   const created = await generateTrips(db, now);
   const reminders = await sendReminders(db, now);
   const parcels = await runParcels(db, now);
-  return { ...created, fixed, missed, reminders, ...subs, parcels };
+  const lateWarnings = await watchLateness(db);
+  return { ...created, fixed, missed, reminders, ...subs, parcels, lateWarnings };
 }
 
 export function token() {
