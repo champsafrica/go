@@ -5,6 +5,7 @@ import './env.js';
 import { openDb, getSettings, tx } from './db.js';
 import { hashPassword } from './auth.js';
 import { runScheduler, token } from './booking.js';
+import { bookParcel } from './parcels.js';
 import { tripFare, driverPayout, planPrice } from './pricing.js';
 import { nowLocal, addDays, addMonths, weekday } from './time.js';
 
@@ -15,6 +16,7 @@ export async function seed(db) {
   const s = await getSettings(db);
   const today = nowLocal().date;
   const pw = hashPassword(DEMO_PASSWORD);
+  let hr;
 
   await tx(db, async db => {
     const user = async (role, name, email, phone, businessId = null) => (await db.prepare(
@@ -40,7 +42,7 @@ export async function seed(db) {
     const [thabo, lindiwe, sipho] = drivers;
 
     const businessId = (await db.prepare("INSERT INTO businesses (name, billing_email) VALUES ('Ubuntu Logistics', 'accounts@ubuntu.test')").run()).lastInsertRowid;
-    await user('business', 'Nomsa Zulu', 'hr@ubuntu.test', '0119990000', businessId);
+    hr = { id: await user('business', 'Nomsa Zulu', 'hr@ubuntu.test', '0119990000', businessId), role: 'business', business_id: businessId };
 
     const passengers = [];
     for (const [name, email, phone, home, work, zone, workZone, km, driver, biz, share, morning, evening] of [
@@ -86,7 +88,7 @@ export async function seed(db) {
           const fare = tripFare(p.km, s, Boolean(p.share));
           const source = p === zanele ? 'subscription' : p === kagiso || p === bongani ? 'wallet' : 'business';
           const value = source === 'subscription' ? price / plan.trips_per_month : fare;
-          const delay = n % 9 === 4 ? 10 : 0;
+          const delay = n % 9 === 4 ? 6 : 0;
           const tripId = (await db.prepare(`INSERT INTO trips (passenger_id, schedule_id, driver_id, date, pickup_time, direction, origin, destination,
             distance_km, fare, driver_payout, shared, status, assignment, payment_source, delay_minutes, share_token, completed_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', 'preferred', ?, ?, ?, ?)`)
@@ -100,11 +102,34 @@ export async function seed(db) {
         }
       }
     }
+    // One late pickup credited under the On-time Promise.
+    const late = await db.prepare("SELECT * FROM trips WHERE passenger_id = ? ORDER BY date DESC, pickup_time DESC LIMIT 1").get(kagiso.id);
+    await db.prepare('UPDATE trips SET delay_minutes = 14, promise_credit = fare WHERE id = ?').run(late.id);
+    await db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, trip_id, description, created_at) VALUES (?, ?, 'refund', ?, ?, ?)")
+      .run(kagiso.id, late.fare, late.id, `On-time Promise: 14 min late on ${late.date}`, `${late.date} 18:05:00`);
+    // A parcel delivered last week on Thabo's morning run.
+    const run = await db.prepare("SELECT * FROM trips WHERE passenger_id = ? AND direction = 'to_work' ORDER BY date DESC LIMIT 1").get(zanele.id);
+    await db.prepare(`INSERT INTO parcels (sender_id, trip_id, date, from_zone, to_zone, pickup_address, dropoff_address, recipient_name,
+      recipient_phone, size, description, price, driver_payout, payment_source, status, code, token, delivered_at)
+      VALUES (?, ?, ?, 'Soweto', 'Sandton', '14 Vilakazi St, Orlando West', '3 Rivonia Rd, Sandton', 'Lerato Mokoena', '0830000099',
+      'small', 'Signed contract', ?, ?, 'wallet', 'delivered', '4821', ?, ?)`)
+      .run(kagiso.id, run.id, run.date, s.parcel_small, driverPayout(s.parcel_small, s), token(), `${run.date} 07:40:00`);
+    await db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, description, created_at) VALUES (?, ?, 'trip', 'Go Parcel to Sandton', ?)")
+      .run(kagiso.id, -s.parcel_small, `${run.date} 06:00:00`);
     await db.prepare("INSERT INTO complaints (user_id, trip_id, category, message) VALUES (?, (SELECT MAX(id) FROM trips WHERE passenger_id = ?), 'Late pickup', 'Driver was 10 minutes late and did not let me know.')")
       .run(kagiso.id, kagiso.id);
   });
 
   await runScheduler(db);
+
+  // Upcoming parcels on the next weekday's runs.
+  let day = addDays(today, 1);
+  while (weekday(day) > 5) day = addDays(day, 1);
+  const kagisoUser = await db.prepare("SELECT * FROM users WHERE email = 'kagiso@gorides.test'").get();
+  await bookParcel(db, kagisoUser, { date: day, from_zone: 'Soweto', to_zone: 'Sandton', pickup_address: '22 Vilakazi St, Orlando West',
+    dropoff_address: '1 Sandton Dr, Sandton', recipient_name: 'Thandi Nkosi', recipient_phone: '0830000088', size: 'medium', description: 'Birthday gift' });
+  await bookParcel(db, hr, { date: day, from_zone: 'Sandton', to_zone: 'Soweto', pickup_address: 'Ubuntu Logistics, 5 Rivonia Rd',
+    dropoff_address: '30 Klipspruit Valley Rd, Orlando East', recipient_name: 'Sizwe Dlamini', recipient_phone: '0830000077', size: 'small', description: 'Staff access cards' });
   return true;
 }
 

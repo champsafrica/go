@@ -56,11 +56,14 @@ export default function businessRoutes(app, db) {
   app.get('/business/report', only, async (req, res) => {
     const b = await company(req);
     const month = /^\d{4}-\d{2}$/.test(req.query.month ?? '') ? req.query.month : nowLocal().date.slice(0, 7);
-    const rows = await db.prepare(`SELECT u.name, COUNT(t.id) AS trips, COALESCE(SUM(t.fare), 0) AS cost, SUM(t.delay_minutes > 0) AS late
+    // Trips credited under the On-time Promise are not charged.
+    const rows = await db.prepare(`SELECT u.name, COUNT(t.id) AS trips, COALESCE(SUM(t.fare - t.promise_credit), 0) AS cost, SUM(t.delay_minutes > 0) AS late
       FROM trips t JOIN users u ON u.id = t.passenger_id
       WHERE u.business_id = ? AND t.payment_source = 'business' AND t.status = 'completed' AND substr(t.date, 1, 7) = ?
       GROUP BY u.id ORDER BY u.name`).all(b.id, month);
-    const total = rows.reduce((a, r) => a + r.cost, 0);
+    const parcels = await db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(price), 0) AS cost FROM parcels
+      WHERE business_id = ? AND payment_source = 'business' AND status = 'delivered' AND substr(date, 1, 7) = ?`).get(b.id, month);
+    const total = rows.reduce((a, r) => a + r.cost, 0) + parcels.cost;
     page(req, res, 'Report', html`
       <div class="row-between"><h1>Monthly report</h1>
         <form method="get" class="filters"><input type="month" name="month" value="${month}" aria-label="Month"><button class="btn btn-sm">Show</button></form></div>
@@ -69,8 +72,9 @@ export default function businessRoutes(app, db) {
         <div class="card stat"><span>Amount due</span><strong>${rand(total)}</strong></div>
         <div class="card stat"><span>Employees travelling</span><strong>${rows.length}</strong></div>
       </div>
-      ${rows.length ? html`<table class="table"><thead><tr><th>Employee</th><th class="num">Rides</th><th class="num">Late pickups</th><th class="num">Cost</th></tr></thead><tbody>
+      ${rows.length || parcels.n ? html`<table class="table"><thead><tr><th>Employee</th><th class="num">Rides</th><th class="num">Late pickups</th><th class="num">Cost</th></tr></thead><tbody>
         ${rows.map(r => html`<tr><td>${r.name}</td><td class="num">${r.trips}</td><td class="num">${r.late}</td><td class="num">${rand(r.cost)}</td></tr>`)}
+        ${parcels.n ? html`<tr><td>Go Parcels delivered</td><td class="num">${parcels.n}</td><td></td><td class="num">${rand(parcels.cost)}</td></tr>` : ''}
         <tr class="total"><td>Total</td><td></td><td></td><td class="num">${rand(total)}</td></tr></tbody></table>
         <p class="muted">Go Rides invoices ${b.billing_email} for this amount at the end of the month. <button class="link" type="button" data-print>Print or save as PDF</button></p>` : empty('No rides billed to your company this month.')}`);
   });

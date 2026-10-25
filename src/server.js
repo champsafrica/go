@@ -15,6 +15,7 @@ import passengerRoutes from './routes/passenger.js';
 import driverRoutes from './routes/driver.js';
 import adminRoutes from './routes/admin.js';
 import businessRoutes from './routes/business.js';
+import parcelRoutes from './routes/parcels.js';
 
 // Booking, reminders and renewals run at most this often.
 const BOOKING_INTERVAL_MS = 5 * 60 * 1000;
@@ -69,7 +70,7 @@ export function createApp(db) {
   });
 
   app.use(sessionMiddleware(db));
-  for (const routes of [publicRoutes, passengerRoutes, driverRoutes, adminRoutes, businessRoutes]) routes(app, db);
+  for (const routes of [publicRoutes, passengerRoutes, driverRoutes, adminRoutes, businessRoutes, parcelRoutes]) routes(app, db);
   app.use((req, res) => res.status(404).send(String(layout(req, { title: 'Not found', body: html`<h1>Page not found</h1><p><a href="/">Back to Go Rides</a></p>` }))));
   app.use((err, req, res, _next) => {
     console.error(err);

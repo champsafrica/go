@@ -3,6 +3,7 @@ import { getSettings, tx } from './db.js';
 import { tripFare, driverPayout, subscriptionTripValue, round2, rand } from './pricing.js';
 import { notify, notifyAdmins } from './notify.js';
 import { nowLocal, addDays, addMonths, weekday, toMinutes, formatDate } from './time.js';
+import { runParcels } from './parcels.js';
 
 // A driver is busy if another of their trips starts within this many minutes.
 export const TRIP_BUFFER_MINUTES = 60;
@@ -308,6 +309,19 @@ export async function settleTrip(db, tripId) {
     }
     await db.prepare("UPDATE trips SET status = 'completed', payment_source = ?, driver_payout = ?, completed_at = datetime('now') WHERE id = ?")
       .run(source, round2(payout), t.id);
+    // On-time Promise: a late pickup is credited back. Go Rides carries the cost; the
+    // driver is still paid. Employers are simply not charged for the trip.
+    if (t.delay_minutes >= s.promise_minutes) {
+      const value = round2(source === 'subscription' ? subscriptionTripValue(sub) : t.fare);
+      await db.prepare('UPDATE trips SET promise_credit = ? WHERE id = ?').run(value, t.id);
+      if (source === 'business') {
+        await notify(db, t.passenger_id, 'On-time Promise', `Your driver was ${t.delay_minutes} minutes late, so your employer is not charged for this ride.`);
+      } else {
+        await db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, trip_id, description) VALUES (?, ?, 'refund', ?, ?)")
+          .run(t.passenger_id, value, t.id, `On-time Promise: ${t.delay_minutes} min late on ${t.date}`);
+        await notify(db, t.passenger_id, 'On-time Promise', `Your driver was ${t.delay_minutes} minutes late. We have added ${rand(value)} ride credit to your balance.`);
+      }
+    }
     if (source === 'wallet') {
       const balance = await walletBalance(db, t.passenger_id);
       if (balance < t.fare * 2) {
@@ -316,6 +330,33 @@ export async function settleTrip(db, tripId) {
     }
     return source;
   });
+}
+
+// On-time Promise, part two: a booked ride that never got a driver is cancelled once its
+// pickup time passes, and the passenger gets the fare as ride credit.
+export async function creditMissedTrips(db, now = nowLocal()) {
+  const missed = await db.prepare(`SELECT * FROM trips WHERE status = 'unassigned' AND (date < ? OR (date = ? AND pickup_time < ?))`)
+    .all(now.date, now.date, now.time);
+  for (const t of missed) {
+    await tx(db, async db => {
+      await db.prepare("UPDATE trips SET status = 'cancelled', promise_credit = fare WHERE id = ?").run(t.id);
+      await db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, trip_id, description) VALUES (?, ?, 'refund', ?, ?)")
+        .run(t.passenger_id, t.fare, t.id, `On-time Promise: no driver on ${t.date} ${t.pickup_time}`);
+      await notify(db, t.passenger_id, 'We are sorry',
+        `We could not find a driver for your ${formatDate(t.date)} ${t.pickup_time} ride. Under our On-time Promise, ${rand(t.fare)} has been added to your ride balance.`);
+    });
+  }
+  return missed.length;
+}
+
+// What a driver has booked for the coming days: trips and parcels already on their schedule.
+export async function earningsForecast(db, driverId, now = nowLocal(), days = 7) {
+  const end = addDays(now.date, days - 1);
+  const trips = await db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(driver_payout), 0) AS amount FROM trips
+    WHERE driver_id = ? AND status = 'scheduled' AND date BETWEEN ? AND ?`).get(driverId, now.date, end);
+  const parcels = await db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(pa.driver_payout), 0) AS amount FROM parcels pa
+    JOIN trips t ON t.id = pa.trip_id WHERE t.driver_id = ? AND pa.status = 'booked' AND pa.date BETWEEN ? AND ?`).get(driverId, now.date, end);
+  return { trips: trips.n, parcels: parcels.n, amount: round2(trips.amount + parcels.amount) };
 }
 
 // Close finished plans, create renewals, and remind passengers a few days before renewal.
@@ -343,9 +384,11 @@ export async function runSubscriptions(db, now = nowLocal(), createPayment) {
 export async function runScheduler(db, now = nowLocal(), createPayment) {
   const subs = await runSubscriptions(db, now, createPayment);
   const fixed = await retryUnassigned(db, now);
+  const missed = await creditMissedTrips(db, now);
   const created = await generateTrips(db, now);
   const reminders = await sendReminders(db, now);
-  return { ...created, fixed, reminders, ...subs };
+  const parcels = await runParcels(db, now);
+  return { ...created, fixed, missed, reminders, ...subs, parcels };
 }
 
 export function token() {

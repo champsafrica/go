@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS trips (
   assignment TEXT CHECK (assignment IN ('preferred','backup','manual')),
   payment_source TEXT CHECK (payment_source IN ('subscription','wallet','business')),
   delay_minutes INTEGER NOT NULL DEFAULT 0,
+  promise_credit REAL NOT NULL DEFAULT 0,
   share_token TEXT NOT NULL UNIQUE,
   reminder_sent INTEGER NOT NULL DEFAULT 0,
   completed_at TEXT,
@@ -207,6 +208,32 @@ CREATE TABLE IF NOT EXISTS businesses (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Go Parcels: packages carried on drivers' scheduled commuter runs.
+CREATE TABLE IF NOT EXISTS parcels (
+  id INTEGER PRIMARY KEY,
+  sender_id INTEGER NOT NULL REFERENCES users(id),
+  business_id INTEGER REFERENCES businesses(id),
+  trip_id INTEGER REFERENCES trips(id),
+  date TEXT NOT NULL,
+  from_zone TEXT NOT NULL,
+  to_zone TEXT NOT NULL,
+  pickup_address TEXT NOT NULL,
+  dropoff_address TEXT NOT NULL,
+  recipient_name TEXT NOT NULL,
+  recipient_phone TEXT NOT NULL,
+  size TEXT NOT NULL CHECK (size IN ('small','medium','large')),
+  description TEXT,
+  price REAL NOT NULL,
+  driver_payout REAL NOT NULL,
+  payment_source TEXT NOT NULL CHECK (payment_source IN ('wallet','business')),
+  status TEXT NOT NULL DEFAULT 'unmatched' CHECK (status IN ('unmatched','booked','collected','delivered','cancelled')),
+  code TEXT NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS parcels_trip ON parcels (trip_id);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -221,14 +248,21 @@ export const DEFAULT_SETTINGS = {
   reminder_minutes: '30',   // pickup reminder lead time
   booking_horizon_days: '7', // how far ahead recurring trips are booked
   shared_discount_pct: '30',  // discount for passengers who share their rides
-  pool_window_minutes: '20'   // shared pickups in one car are at most this far apart
+  pool_window_minutes: '20',  // shared pickups in one car are at most this far apart
+  promise_minutes: '10',      // On-time Promise: a pickup this late earns ride credit
+  parcel_small: '45',         // Go Parcels prices, Rand per parcel
+  parcel_medium: '70',
+  parcel_large: '110',
+  parcel_capacity: '3'        // parcels one driver carries per day
 };
 
 // Columns added after the first release. openDb adds any that an older database lacks.
 const MIGRATIONS = [
   ['passengers', 'work_zone', 'TEXT'],
   ['passengers', 'share_rides', 'INTEGER NOT NULL DEFAULT 0'],
-  ['trips', 'shared', 'INTEGER NOT NULL DEFAULT 0']
+  ['trips', 'shared', 'INTEGER NOT NULL DEFAULT 0'],
+  // Ride credit given under the On-time Promise; employers are not charged this amount.
+  ['trips', 'promise_credit', 'REAL NOT NULL DEFAULT 0']
 ];
 
 export const DEFAULT_PLANS = [

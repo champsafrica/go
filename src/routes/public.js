@@ -1,4 +1,4 @@
-import { html, raw } from '../views/html.js';
+import { html } from '../views/html.js';
 import { layout, csrf, field, statusPill } from '../views/layout.js';
 import { timingSafeEqual } from 'node:crypto';
 import { hashPassword, verifyPassword, createSession, destroySession, homeFor, requireRole } from '../auth.js';
@@ -21,8 +21,8 @@ export const shareBox = checked => html`<label class="check share-check"><input 
 export const list = v => (Array.isArray(v) ? v : v ? [v] : []);
 
 const DAY_OPTIONS = [[5, 'Every weekday'], [3, '3 days a week'], [2, '2 days a week']];
-const ill = (name, alt = '') => html`<img src="/illustrations/${name}.svg" alt="${alt}" loading="lazy" width="160" height="120">`;
-const pinIcon = raw('<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 22s7-7.1 7-12.2A7 7 0 0 0 5 9.8C5 14.9 12 22 12 22Zm0-9.2a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z"/></svg>');
+const ill = (name, alt = '') => html`<img src="/illustrations/${name}.svg" alt="${alt}" width="160" height="120">`;
+const stop = (n, label) => html`<p class="stop"><span>${String(n).padStart(2, '0')}</span>${label}</p>`;
 
 async function landing(req, db) {
   const s = await getSettings(db);
@@ -37,169 +37,153 @@ async function landing(req, db) {
   const best = plans.reduce((a, p) => (!a || Math.abs(p.trips_per_month - needed) < Math.abs(a.trips_per_month - needed) ? p : a), null);
   const zoneOptions = selected => ZONES.map(z => html`<option ${z === selected ? 'selected' : ''}>${z}</option>`);
   const pct = s.shared_discount_pct;
+  const sample = plans.find(p => p.trips_per_month === 44) ?? plans[0];
   return layout(req, { landing: true, body: html`
-  <section class="lp-dark hero">
-    <div class="wrap page hero-grid">
+  <section class="go-hero">
+    <div class="wrap page go-hero-grid">
       <div>
-        <p class="where">${pinIcon} Johannesburg · Pretoria · Cape Town · Durban</p>
-        <h1>Your everyday commute, sorted.</h1>
-        <p class="lede">Plan your trips to work and back once. Go Rides books them every week with a driver you know, for one monthly price.</p>
-        <form class="trip-form" method="get" action="/#prices">
-          <div class="pair">
-            <div class="tf"><span class="dot round"></span><label class="sr" for="home">Home area</label>
-              <select id="home" name="home"><option value="">Where do you live?</option>${zoneOptions(home)}</select></div>
-            <div class="tf"><span class="dot square"></span><label class="sr" for="work">Work area</label>
-              <select id="work" name="work"><option value="">Where do you work?</option>${zoneOptions(work)}</select></div>
-          </div>
-          <div class="tf-row">
-            <div class="tf"><label class="sr" for="days">How often</label>
-              <select id="days" name="days">${DAY_OPTIONS.map(([d, l]) => html`<option value="${d}" ${d === days ? 'selected' : ''}>${l}</option>`)}</select></div>
-            <div class="tf"><label class="sr" for="km">One-way distance in km</label>
-              <input id="km" type="number" name="km" min="1" max="80" value="${km}" inputmode="numeric" aria-describedby="km-hint"></div>
-          </div>
-          <small id="km-hint" class="muted">One-way distance in km. An estimate is fine.</small>
-          <div class="actions"><button class="btn btn-light">See prices</button><a href="/login">Log in to see your rides</a></div>
-        </form>
-      </div>
-      <div class="hero-visual" aria-hidden="true">
-        <img src="/illustrations/hero-map.svg" alt="">
-        <div class="float float-week"><strong>This week</strong>10 rides booked
-          <div class="days"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span class="off">S</span></div></div>
-        <div class="float float-share">Shared ride · save ${pct}%</div>
-        <div class="float float-driver"><div class="avatar">TM</div><div><strong>Thabo M.</strong>White Corolla Quest<br>★ 4.9</div>
-          <div class="eta">06:30<small>pickup</small></div></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="lp-dark lp" style="padding-top:0">
-    <div class="wrap page">
-      <h2>Explore what you can do with Go Rides</h2>
-      <div class="explore">
-        <a class="xcard" href="#ride"><div><h3>Daily commute</h3><p>The same trusted driver, to work and back, every day you travel.</p><span class="details">Details</span></div>${ill('commute')}</a>
-        <a class="xcard" href="#share"><div><h3>Shared rides</h3><p>Ride with neighbours going your way and pay ${pct}% less.</p><span class="details">Details</span></div>${ill('shared')}</a>
-        <a class="xcard" href="#prices"><div><h3>Ride packs</h3><p>Prepay 10, 20 or 40 rides and use them when you need them.</p><span class="details">Details</span></div>${ill('packs')}</a>
-        <a class="xcard" href="#business"><div><h3>For employers</h3><p>Dependable transport for your staff, on one monthly invoice.</p><span class="details">Details</span></div>${ill('business')}</a>
-        <a class="xcard" href="#drive"><div><h3>Drive with us</h3><p>Regular passengers and steady, scheduled earnings.</p><span class="details">Details</span></div>${ill('drive')}</a>
-        <a class="xcard" href="#safety"><div><h3>Safety</h3><p>Vetted drivers, live trip sharing and help at one tap.</p><span class="details">Details</span></div>${ill('safety')}</a>
-      </div>
-    </div>
-  </section>
-
-  <section class="lp lp-white" id="ride">
-    <div class="wrap page">
-      <h2>How Go Rides works</h2>
-      <div class="steps3">
-        <div class="step">${ill('route')}<h3>Tell us your route</h3><p>Your home and work addresses, the days you travel and your pickup times.</p></div>
-        <div class="step">${ill('commute')}<h3>Meet your driver</h3><p>Choose a verified driver to collect you every day. Approved backups stand by if they cannot make it.</p></div>
-        <div class="step">${ill('calendar')}<h3>Ride all month</h3><p>Every ride is booked a week ahead. Pay one monthly price, with no surge pricing and no searching each morning.</p></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="lp" id="prices">
-    <div class="wrap page">
-      <h2>${home && work ? `${home} to ${work}` : 'Simple monthly prices'}</h2>
-      <p class="lede">Priced for a ${km} km trip each way, ${DAY_OPTIONS.find(([d]) => d === days)[1].toLowerCase()}. Change it in the trip planner above.</p>
-      <div class="plans" style="margin-top:28px">
-        ${plans.map(p => html`<div class="plan-card ${p === best ? 'best' : ''}">${p === best ? html`<span class="tag">Best match</span>` : ''}
-          <h3>${p.name}</h3><p class="muted">${p.trips_per_month} trips a month · ${p.description}</p>
-          <p class="price">${rand(planPrice(p, km, s))}<small> /month</small></p>
-          <div class="shared-line"><span>Shared ride</span><strong>${rand(planPrice(p, km, s, true))} /month</strong></div>
-          <a class="btn ${p === best ? '' : 'btn-ghost'}" href="/register?as=passenger">Choose ${p.name}</a></div>`)}
-      </div>
-      <p class="muted" style="margin-top:18px">Pay as you go from a prepaid ride balance: ${rand(tripFare(km, s))} a trip, or ${rand(tripFare(km, s, true))} shared.</p>
-    </div>
-  </section>
-
-  <section class="lp lp-white" id="share">
-    <div class="wrap page feature">
-      <div>
-        <h2>Share the ride. Pay ${pct}% less.</h2>
-        <p class="lede">Neighbours who work in the same area and leave at about the same time ride together. You keep door-to-door service and your own pickup time.</p>
-        <ul class="ticks">
-          <li>Matched by home area, work area and pickup time</li>
-          <li>Never more people than the car has seats</li>
-          <li>The shared price applies even when nobody joins you</li>
+        <p class="kicker">The planned commute · Johannesburg · Pretoria · Cape Town · Durban</p>
+        <h1>Own your <span class="mark">commute</span>.</h1>
+        <p class="lede">One monthly Go Pass gets you your own driver, a price that never surges, and a promise to be on time. Share with neighbours to pay less, and send parcels on the same routes.</p>
+        <div class="cta-row"><a class="btn btn-go" href="#pass">Build my Go Pass</a><a class="btn btn-line" href="#parcels">Send a parcel</a></div>
+        <ul class="promise-strip">
+          <li><strong>No surge.</strong> Ever.</li><li><strong>Same driver</strong> daily</li><li><strong>Late?</strong> Ride credit</li><li><strong>Parcels</strong> from ${rand(s.parcel_small)}</li>
         </ul>
-        <a class="btn" href="/register?as=passenger">Start sharing</a>
       </div>
-      <div class="feature-visual">${ill('shared')}</div>
-    </div>
-  </section>
-
-  <section class="lp lp-white" style="padding-top:0">
-    <div class="wrap page feature flip">
-      <div>
-        <h2>Know who is coming, every day</h2>
-        <p class="lede">See your driver's name, car and registration before every ride. Get a reminder before pickup, and a message straight away if anything changes.</p>
-        <ul class="ticks"><li>Pickup reminders on WhatsApp, SMS or email</li><li>Live location once your driver is on the way</li><li>Backup drivers you have approved</li></ul>
-      </div>
-      <div class="feature-visual light" aria-hidden="true">
-        <div>
-          <div class="mock"><div class="row-between"><strong>Tomorrow, 06:30</strong><span class="pill pill-scheduled">Scheduled</span></div>
-            <div class="driver" style="margin-top:12px"><div class="avatar">TM</div><div><strong>Thabo Mokoena</strong><br><span class="muted">White Toyota Corolla Quest · HJ 23 KL GP</span><br><span class="stars">★ 4.9</span></div></div></div>
-          <div class="mock"><div class="row-between"><strong>Your driver is on the way</strong><span class="pill pill-en_route">4 min</span></div><p class="muted">Orlando West → Sandton</p></div>
+      <div class="pass-stage" aria-hidden="true">
+        <div class="go-pass">
+          <div class="gp-top"><img src="/brand/go-rides-logo.png" alt="" class="gp-logo"><span>GO PASS · MONTHLY</span></div>
+          <div class="gp-route"><div><small>FROM</small><strong>Soweto</strong><span>06:30</span></div><div class="gp-line"></div><div><small>TO</small><strong>Sandton</strong><span>17:00</span></div></div>
+          <div class="gp-days">${['M', 'T', 'W', 'T', 'F'].map(d => html`<span>${d}</span>`)}<span class="off">S</span><span class="off">S</span></div>
+          <div class="gp-row"><div><small>PASSENGER</small><strong>Zanele M.</strong></div><div><small>YOUR DRIVER</small><strong>Thabo M. ★4.9</strong></div></div>
+          <div class="gp-foot"><div><small>PRICE LOCKED</small><strong>${rand(planPrice(sample, 24, s, true))}<em>/month</em></strong></div><div class="gp-code"></div></div>
         </div>
+        <div class="sticker sticker-promise">On-time<br>Promise</div>
+        <div class="sticker sticker-parcel">${ill('parcel')}<span>Parcel on board</span></div>
       </div>
     </div>
   </section>
 
-  <section class="lp lp-dark" id="drive">
+  <section class="go-section" id="promises">
     <div class="wrap page">
-      <div class="feature">
-        <div>
-          <h2>Drive with Go Rides</h2>
-          <p class="lede">Regular passengers on routes you know, booked a week ahead. You keep ${100 - s.commission_pct}% of every fare, and a full shared car earns more than a solo trip.</p>
-          <a class="btn btn-light" href="/register?as=driver">Sign up to drive</a>
-        </div>
-        <div class="feature-visual" style="background:#141416" aria-hidden="true">
-          <div class="mock"><span class="muted">This week</span><div class="big">R3 240</div><span class="muted">42 trips · ★ 4.9</span>
-            <div class="mock-bars"><span style="height:70%"></span><span style="height:85%"></span><span style="height:60%"></span><span style="height:95%"></span><span style="height:80%"></span><span class="dim" style="height:20%"></span><span class="dim" style="height:10%"></span></div></div>
-        </div>
-      </div>
-      <div class="cols3" style="margin-top:56px">
-        <div><h3>Know your week in advance</h3><p>Trips are booked seven days ahead, so you can plan your days and your income.</p><a class="text-link" href="/register?as=driver">Sign up to drive</a></div>
-        <div><h3>Regular passengers</h3><p>Commuters choose you as their driver and ride with you every day.</p><a class="text-link" href="/register?as=driver">Get started</a></div>
-        <div><h3>Set your hours</h3><p>Choose the days and times you drive, and book time off whenever you need it.</p><a class="text-link" href="/register?as=driver">Learn more</a></div>
+      ${stop(1, 'The Go promises')}
+      <h2>Four promises on-demand apps don't make</h2>
+      <div class="promises">
+        <article class="promise"><div class="promise-art">${ill('calendar')}</div><h3>Price Lock</h3><p>Your monthly price is fixed when you buy your Go Pass. No surge at rush hour, in the rain or on month-end Friday.</p></article>
+        <article class="promise"><div class="promise-art">${ill('commute')}</div><h3>Your driver</h3><p>The same verified driver collects you every day, with approved backups if they cannot make it. You always know who is coming.</p></article>
+        <article class="promise"><div class="promise-art">${ill('safety')}</div><h3>On-time Promise</h3><p>If your driver is ${s.promise_minutes} minutes late or more, or we cannot find you a driver, the ride comes back to you as credit. Automatically.</p></article>
+        <article class="promise"><div class="promise-art">${ill('shared')}</div><h3>Share &amp; save</h3><p>Ride with neighbours who work near you and pay ${pct}% less, with your own pickup time and door-to-door service.</p></article>
       </div>
     </div>
   </section>
 
-  <section class="lp lp-white" id="business">
-    <div class="wrap page feature flip">
-      <div>
-        <h2>Go Rides for Business</h2>
-        <p class="lede">Get your team to work on time. Add employees, and their rides are billed to you on one monthly invoice with a report of every trip.</p>
-        <ul class="ticks"><li>Add or remove employees in seconds</li><li>Monthly report of rides, costs and late pickups</li><li>Shared rides to cut transport costs</li></ul>
-        <a class="btn" href="/register?as=business">Open a business account</a>
-      </div>
-      <div class="feature-visual orange" aria-hidden="true">
-        <div class="mock"><div class="row-between"><strong>October report</strong><span class="muted">42 employees</span></div>
-          <div class="row-between"><span class="muted">Rides</span><strong>1 764</strong></div>
-          <div class="row-between"><span class="muted">On time</span><strong>97%</strong></div>
-          <div class="row-between"><span class="muted">Amount due</span><strong>R61 740</strong></div></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="lp lp-white" id="safety" style="padding-top:0">
-    <div class="wrap page feature">
-      <div>
-        <h2>Safety in every ride</h2>
-        <p class="lede">Every driver is checked before their first trip, and help is one tap away during every ride.</p>
-        <ul class="ticks"><li>ID, driver's licence and PrDP checked</li><li>Share your live trip with family</li><li>SOS alerts reach our team and your emergency contact</li></ul>
-      </div>
-      <div class="feature-visual">${ill('safety')}</div>
-    </div>
-  </section>
-
-  <section class="lp lp-white" style="padding-top:0">
+  <section class="go-section go-cream-2" id="ride">
     <div class="wrap page">
-      <div class="banner">
-        <div><h2>Ready for an easier commute?</h2><p>Set up your weekly trips in a few minutes. Your first ride can be booked tomorrow.</p>
-          <div class="row" style="margin-top:20px"><a class="btn" href="/register?as=passenger">Plan my commute</a><a class="btn btn-light" href="/register?as=driver">Drive with us</a></div></div>
-        ${ill('calendar')}
+      ${stop(2, 'Planned beats on-demand')}
+      <h2>Stop hailing. Start going.</h2>
+      <div class="versus" role="table" aria-label="On-demand apps compared with Go Rides">
+        <div class="vs-head" role="row"><span role="columnheader"></span><span role="columnheader">On-demand apps</span><span role="columnheader" class="vs-go">Go Rides</span></div>
+        ${[['Price', 'Changes with demand, by surge or bidding', 'Locked for the month on your Go Pass'],
+           ['Driver', 'Whoever is closest at the time', 'Your own driver, every day'],
+           ['Booking', 'Request every single trip', 'Booked a week ahead, automatically'],
+           ['Running late', 'Your problem', 'Ride credit under the On-time Promise'],
+           ['Parcels', 'A separate courier app', 'Ride along on the same routes'],
+           ['Drivers', 'Income depends on each day\'s requests', 'Next week\'s trips booked in advance']]
+          .map(([k, a, b]) => html`<div class="vs-row" role="row"><span role="rowheader">${k}</span><span role="cell">${a}</span><span role="cell" class="vs-go">${b}</span></div>`)}
+      </div>
+    </div>
+  </section>
+
+  <section class="go-section go-forest" id="pass">
+    <div class="wrap page">
+      ${stop(3, 'Build your Go Pass')}
+      <h2>${home && work ? `${home} to ${work}` : 'What will your Go Pass cost?'}</h2>
+      <form class="pass-builder" method="get" action="/#pass">
+        <label>Home area<select name="home"><option value="">Choose</option>${zoneOptions(home)}</select></label>
+        <label>Work area<select name="work"><option value="">Choose</option>${zoneOptions(work)}</select></label>
+        <label>How often<select name="days">${DAY_OPTIONS.map(([d, l]) => html`<option value="${d}" ${d === days ? 'selected' : ''}>${l}</option>`)}</select></label>
+        <label>Distance (km, one way)<input type="number" name="km" min="1" max="80" value="${km}" inputmode="numeric"></label>
+        <button class="btn btn-go">Update prices</button>
+      </form>
+      <div class="passes">
+        ${plans.map(p => html`<div class="pass-card ${p === best ? 'best' : ''}">${p === best ? html`<span class="tag">Best fit</span>` : ''}
+          <h3>${p.name}</h3><p class="pc-meta">${p.trips_per_month} trips a month · ${p.description}</p>
+          <div class="pc-prices"><div><small>Shared</small><strong>${rand(planPrice(p, km, s, true))}</strong></div><div><small>Solo</small><strong>${rand(planPrice(p, km, s))}</strong></div></div>
+          <p class="pc-note">per month, price locked</p>
+          <a class="btn ${p === best ? 'btn-go' : 'btn-line'}" href="/register?as=passenger">Get this pass</a></div>`)}
+      </div>
+      <p class="pass-note">Rather pay as you go? Prepaid rides cost ${rand(tripFare(km, s))} a trip, or ${rand(tripFare(km, s, true))} shared.</p>
+    </div>
+  </section>
+
+  <section class="go-section" id="parcels">
+    <div class="wrap page split">
+      <div>
+        ${stop(4, 'Go Parcels')}
+        <h2>Your parcel rides the commute</h2>
+        <p class="lede">Every morning and evening, Go Rides drivers cover the same routes, such as Soweto to Sandton, with space to spare. Go Parcels puts your package on one of those runs, so it costs little and arrives the same day.</p>
+        <ol class="route-steps">
+          <li><strong>Book a route and size</strong>Pick the areas, the day and the size. The price is fixed.</li>
+          <li><strong>A driver collects it</strong>It travels on a scheduled run, tracked from collection to delivery.</li>
+          <li><strong>Hand-over with a code</strong>The recipient gets a code by SMS. No code, no delivery.</li>
+        </ol>
+        <div class="cta-row"><a class="btn btn-go" href="/register?as=passenger">Send a parcel</a><a class="btn btn-line" href="#business">For businesses</a></div>
+      </div>
+      <div class="parcel-prices">
+        ${[['small', 'Small', 'Documents, a phone, a small box'], ['medium', 'Medium', 'A shoe box to a backpack'], ['large', 'Large', 'Up to a suitcase']]
+          .map(([k, name, what]) => html`<div class="pp"><div><strong>${name}</strong><span>${what}</span></div><b>${rand(s[`parcel_${k}`])}</b></div>`)}
+        <div class="pp-art">${ill('parcel')}</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="go-section go-orange" id="drive">
+    <div class="wrap page split">
+      <div>
+        ${stop(5, 'Drive with Go')}
+        <h2>Know next week's pay today</h2>
+        <p class="lede">Go Rides drivers see their booked trips and parcels a week ahead. They keep ${100 - s.commission_pct}% of every fare, a full shared car pays more than a solo trip, and parcels earn extra on runs they already make.</p>
+        <a class="btn btn-ink" href="/register?as=driver">Sign up to drive</a>
+      </div>
+      <div class="forecast-card" aria-hidden="true">
+        <small>Booked for the next 7 days</small><div class="big">R3 640</div><span>42 trips · 6 parcels · ★ 4.9</span>
+        <div class="fc-bars">${[70, 85, 60, 95, 80, 18, 8].map((h, i) => html`<span class="${i > 4 ? 'dim' : ''}" style="height:${h}%"></span>`)}</div>
+        <div class="fc-days"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="go-section" id="business">
+    <div class="wrap page split flip">
+      <div>
+        ${stop(6, 'Go for Business')}
+        <h2>Staff transport and deliveries on one invoice</h2>
+        <p class="lede">Get your team to work on time and move documents and stock between sites on the same network. One monthly report, one invoice, and nothing charged for late pickups.</p>
+        <ul class="ticks"><li>Add or remove employees in seconds</li><li>Courier runs between branches with Go Parcels</li><li>On-time reporting for every employee</li></ul>
+        <a class="btn btn-ink" href="/register?as=business">Open a business account</a>
+      </div>
+      <div class="biz-art">${ill('business')}</div>
+    </div>
+  </section>
+
+  <section class="go-section go-cream-2" id="safety">
+    <div class="wrap page split">
+      <div>
+        ${stop(7, 'Safety')}
+        <h2>Someone always knows where you are</h2>
+        <p class="lede">Every driver is checked before their first trip, and you ride with the same people every day.</p>
+        <ul class="ticks"><li>ID, driver's licence and PrDP checked</li><li>Live trip link for family</li><li>SOS reaches our team and your emergency contact</li></ul>
+      </div>
+      <div class="biz-art">${ill('safety')}</div>
+    </div>
+  </section>
+
+  <section class="go-section">
+    <div class="wrap page">
+      <div class="final-cta">
+        <h2>Your commute, sorted for the whole month.</h2>
+        <p>Set it up in a few minutes. Your first ride can be tomorrow morning.</p>
+        <div class="cta-row"><a class="btn btn-go" href="/register?as=passenger">Get my Go Pass</a><a class="btn btn-line-light" href="/register?as=driver">Drive with us</a><a class="btn btn-line-light" href="/app">Get the app</a></div>
       </div>
     </div>
   </section>` });
@@ -256,6 +240,32 @@ function registerPage(req, as, values = {}, error = '') {
 
 export default function publicRoutes(app, db) {
   app.get('/', async (req, res) => res.send(String(await landing(req, db))));
+  app.get('/app', async (req, res) => {
+    res.send(String(layout(req, { title: 'Get the app', body: html`
+      <section class="split" style="margin-top:32px">
+        <div>
+          <p class="stop"><span>App</span>Go Rides on your phone</p>
+          <h1 style="font-size:clamp(2rem,6vw,3rem);font-weight:800;letter-spacing:-.04em">Your rides, one tap away</h1>
+          <p class="lede">Install Go Rides on your home screen. It opens like an app, with your next pickup, live tracking, parcels and notifications. There is nothing to download from an app store, and it takes no space to speak of.</p>
+          <p style="margin-top:20px"><button type="button" class="btn btn-go" data-install>Install Go Rides</button></p>
+          <div class="app-steps" style="margin-top:28px">
+            <div class="card"><h3>Android (Chrome)</h3><ol><li>Open this page in Chrome.</li><li>Tap <strong>Install Go Rides</strong>, or the menu ⋮ then <strong>Install app</strong>.</li></ol></div>
+            <div class="card"><h3>iPhone (Safari)</h3><ol><li>Open this page in Safari.</li><li>Tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>.</li></ol></div>
+          </div>
+        </div>
+        <div class="phone" aria-hidden="true"><div class="phone-screen">
+          <div class="phone-top"><img src="/brand/go-rides-logo.png" alt=""></div>
+          <div class="phone-body">
+            <div class="mini"><b>Tomorrow, 06:30</b>Thabo M. · White Corolla Quest</div>
+            <div class="mini dark"><span>Booked this week</span><b>10 rides</b></div>
+            <div class="mini"><b>Parcel to Sandton</b>On its way</div>
+            <div class="mini"><b>Price locked</b>R1 646 / month</div>
+          </div>
+          <div class="phone-nav"><span></span><span></span><span></span><span></span><span></span></div>
+        </div></div>
+      </section>` })));
+  });
+
   app.get('/home', requireRole('passenger', 'driver', 'admin', 'business'), async (req, res) => res.redirect(homeFor(req.user)));
 
   app.get('/register', async (req, res) => {

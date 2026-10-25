@@ -40,6 +40,11 @@ Requires Node 22. The app is Express with a SQLite database (through the libSQL 
 | Passenger registration with home, work, area, distance and emergency contact | `/register` |
 | Recurring trips (for example Mon to Fri, 07:00 and 17:00) | Passenger → Schedule |
 | Shared rides: neighbours on the same route share a car and pay less | Passenger → Schedule or Home |
+| On-time Promise: late pickups and missed rides become ride credit automatically | `settleTrip`, `creditMissedTrips` in `src/booking.js` |
+| Price Lock: the monthly price is fixed for the plan's period | Passenger → Plans & pay |
+| Go Parcels: parcels ride along on scheduled commuter runs, delivered against a code | `/parcels`, `src/parcels.js` |
+| Earnings forecast: drivers see the next 7 days of booked income | Driver → Today and Earnings |
+| Installable web app with bottom navigation and offline screen | `/app`, `public/manifest.webmanifest`, `public/sw.js` |
 | Preferred driver and approved backup drivers | Passenger → Drivers |
 | Automatic booking a week ahead, with backup allocation | `src/booking.js` |
 | Monthly plans, prepaid ride packs, renewals and reminders | Passenger → Plans & pay, `src/payments.js` |
@@ -63,6 +68,16 @@ For each booked trip, `pickDriver` tries in order:
 4. any verified driver.
 
 A driver qualifies only if they are approved, available at that time on that weekday, not on time off, and have no other trip within 60 minutes. If nobody qualifies, the trip shows as *Finding driver*, admins are alerted, and the next booking run (every five minutes) tries again. When a driver books time off or is suspended, their trips move to backups and passengers are told who is coming instead.
+
+### What sets Go Rides apart
+
+On-demand apps price each trip on the spot, send whichever driver is nearest, and leave drivers guessing about tomorrow. Because every Go Rides trip is planned, it can promise more:
+
+- **Price Lock.** A Go Pass price is fixed for its month. There is no surge.
+- **Your driver.** The same verified driver every day, with backups you approve.
+- **On-time Promise.** When a driver reports a pickup at least `promise_minutes` late (10 by default), the trip value goes back to the passenger as ride credit (an employer is simply not charged). A booked ride that never gets a driver is cancelled at pickup time and its fare credited. Go Rides carries the cost; the driver is still paid. Lateness is based on the delay the driver reports; using live location to detect it is a natural next step.
+- **Go Parcels: commuter-route logistics.** Drivers already cover the same routes every morning and evening. A parcel from Soweto to Sandton rides on a morning run carrying a Soweto passenger to work in Sandton, or on an evening run the other way. Senders pay a fixed price by size from their ride balance, or on the employer's invoice. The recipient gets a 4-digit code by SMS, and the driver must enter it to complete delivery. Each driver carries at most `parcel_capacity` parcels a day. If a parcel's run is cancelled it moves to another run, and if no run is found by its day it is refunded.
+- **Earnings forecast.** Drivers see the trips and parcels already booked for the next 7 days, and earn extra from parcels on runs they already make.
 
 ### Shared rides
 
@@ -96,9 +111,19 @@ All pricing is set by admins under **Pricing** and applies to new bookings. The 
 Go Rides shares the Go Ads identity from [www.goads.co.za](https://www.goads.co.za):
 
 - **Logo:** `public/brand/go-rides-logo.png` keeps the "Go" (with the map-pin "o") from the Go Ads wordmark, and sets "rides" in Fredoka Bold in the same orange with a white outline. The favicon is the Go Ads pin mark, and the app icons are PNG versions of it.
-- **Colours:** Go Ads orange `#ff4d00`, forest `#072014` and mint `#86ffb4` as accents in a black-and-white layout modelled on uber.com. Buttons are black, or white on dark sections, which keeps their text easy to read.
+- **Colours:** orange, green, black and white only, across the whole system: Go Ads orange `#ff4d00` (buttons, with black text), forest `#072014` and mint `#86ffb4`, plus tints and shades of those greens for lines, secondary text and light panels. Warnings and errors use orange. A browser audit of every page confirms nothing else is rendered (the OpenStreetMap trip map is the one outside element).
+- **Look:** the "Go Pass", the commute as a monthly pass, with a dashed route line and numbered stops as the recurring motif. Comparisons on the site name "on-demand apps" rather than competitors, to stay within South Africa's advertising code on comparative claims.
 - **Font:** Poppins throughout, self-hosted in `public/fonts/` under the SIL Open Font License.
-- **Illustrations:** `public/illustrations/` holds flat SVG drawings in the brand colours (car, shared ride, ride pack, business, driving, safety, calendar, route) and the hero route map. Photographs of your own drivers and cars would make the landing page stronger; they can replace any illustration.
+- **Illustrations:** `public/illustrations/` holds flat SVG drawings in the four colours. Photographs of your own drivers and cars can replace any of them.
+
+## The web app
+
+Go Rides is an installable web app (a PWA), so there is nothing to publish to an app store:
+
+- **Install:** Chrome and Edge show an **Install app** button; on iPhone, Safari's Share > Add to Home Screen. `/app` explains both, and phones see a dismissible install card.
+- **App navigation:** signed-in passengers, drivers and employers get a bottom tab bar on phones, as in a native app.
+- **Offline:** the service worker caches the app shell (styles, script, fonts, logo, illustrations) and shows an offline screen when there is no connection. Pages always load live, because ride details change.
+- **Icons and shortcuts:** standard and maskable icons, and home-screen shortcuts to your Go Rides home and notifications.
 
 ## Deploying to Vercel
 

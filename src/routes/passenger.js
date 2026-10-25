@@ -223,6 +223,7 @@ export default function passengerRoutes(app, db) {
         ${t.driver_phone && live ? html`<p><a class="btn btn-sm btn-ghost" href="tel:${t.driver_phone}">Call driver</a></p>` : ''}
         ${live ? html`<div class="map" data-field="map"></div><p class="muted" data-field="updated"></p>` : ''}
         <p class="muted">Fare ${rand(t.fare)}${t.payment_source ? ` · paid by ${t.payment_source}` : ''}</p>
+        ${t.promise_credit ? html`<p class="flash ok">On-time Promise: ${rand(t.promise_credit)} ${t.payment_source === 'business' ? 'not charged to your employer' : 'credited to your ride balance'}.</p>` : ''}
       </div>
       ${live ? html`<div class="card"><h3>Safety</h3>
         <p>Share this link so family can follow your ride:</p>
@@ -317,6 +318,7 @@ export default function passengerRoutes(app, db) {
       ${sub ? html`<div class="card"><h3>Current plan: ${sub.plan_name}</h3>
         <p>${formatDate(sub.period_start)} to ${formatDate(sub.period_end)} · ${sub.trips_used}/${sub.trips_included} trips used · ${rand(sub.price)}/month</p>
         <div class="meter"><span style="width:${Math.min(100, Math.round(sub.trips_used / sub.trips_included * 100))}%"></span></div>
+        <p class="lock">Price Lock: ${rand(sub.price)} until ${formatDate(sub.period_end)}, whatever the traffic, weather or demand.</p>
         <form method="post" action="/passenger/subscription/${sub.id}/auto-renew">${csrf(req)}<button class="link">${sub.auto_renew ? 'Turn off auto-renew' : 'Turn on auto-renew'}</button></form></div>` : ''}
       ${upcomingSub ? html`<p class="muted">Next plan (${upcomingSub.plan_name}) starts ${formatDate(upcomingSub.period_start)}.</p>` : ''}
       <h2>Monthly plans</h2>

@@ -72,3 +72,47 @@ if (loc && navigator.geolocation) {
 }
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+// Installing the web app. Chrome and Edge offer a native prompt (beforeinstallprompt);
+// iPhone Safari has none, so there we explain Share > Add to Home Screen instead.
+(() => {
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  if (standalone) return;
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) && !/crios|fxios/i.test(navigator.userAgent);
+  const sheet = document.querySelector('[data-install-sheet]');
+  const buttons = document.querySelectorAll('[data-install]');
+  let deferred = null;
+  const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+  const dismissedRecently = () => Date.now() - Number(store.get('go-install-dismissed') || 0) < 14 * 864e5;
+
+  const install = async () => {
+    if (deferred) {
+      deferred.prompt();
+      await deferred.userChoice.catch(() => {});
+      deferred = null;
+      hide();
+    } else if (ios && sheet) {
+      sheet.hidden = false;
+    } else {
+      location.href = '/app';
+    }
+  };
+  const hide = () => { if (sheet) sheet.hidden = true; buttons.forEach(b => (b.hidden = true)); };
+  const offer = () => {
+    buttons.forEach(b => (b.hidden = false));
+    // On phones, suggest it once in a while; never on the first glance at the landing page.
+    if (sheet && innerWidth < 760 && !dismissedRecently() && location.pathname !== '/') sheet.hidden = false;
+  };
+
+  addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; offer(); });
+  addEventListener('appinstalled', hide);
+  if (ios) offer();
+  buttons.forEach(b => b.addEventListener('click', install));
+  document.querySelectorAll('[data-install-go]').forEach(b => b.addEventListener('click', install));
+  document.querySelectorAll('[data-install-close]').forEach(b => b.addEventListener('click', () => { store.set('go-install-dismissed', String(Date.now())); hide(); }));
+  if (ios && sheet) {
+    // The iPhone sheet's own button says what to do rather than opening a prompt.
+    sheet.querySelector('[data-install-text]').textContent = 'Tap the Share button in Safari, then "Add to Home Screen".';
+    sheet.querySelector('[data-install-go]').hidden = true;
+  }
+})();

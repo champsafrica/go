@@ -2,7 +2,9 @@ import { html } from '../views/html.js';
 import { layout, csrf, field, tripCard, stars, empty } from '../views/layout.js';
 import { requireRole } from '../auth.js';
 import { getSettings } from '../db.js';
-import { settleTrip, reassignDriverTrips, driverRating, carMates } from '../booking.js';
+import { settleTrip, reassignDriverTrips, driverRating, carMates, earningsForecast } from '../booking.js';
+import { driverParcels, collectParcel, deliverParcel } from '../parcels.js';
+import { parcelPill } from './parcels.js';
 import { notify } from '../notify.js';
 import { rand } from '../pricing.js';
 import { nowLocal, addDays, WEEKDAYS, formatDate } from '../time.js';
@@ -56,12 +58,24 @@ export default function driverRoutes(app, db) {
       <select name="minutes" aria-label="Delay">${[5, 10, 15, 20, 30].map(m => html`<option value="${m}">${m} min</option>`)}</select><button class="btn btn-sm btn-ghost">Report delay</button></form>` : ''}
   </div>`;
 
+  const parcelCard = (req, p) => html`<article class="card parcel-card">
+    <div class="row-between"><strong>Parcel · ${p.size}</strong>${parcelPill(p.status)}</div>
+    <p>${formatDate(p.date)}, on your ${p.pickup_time} run · you earn ${rand(p.driver_payout)}</p>
+    <p><span class="muted">Collect:</span> ${p.pickup_address} (${p.from_zone})<br><span class="muted">Deliver:</span> ${p.dropoff_address} (${p.to_zone}) to ${p.recipient_name}, <a href="tel:${p.recipient_phone}">${p.recipient_phone}</a></p>
+    ${p.description ? html`<p class="muted">${p.description}</p>` : ''}
+    ${p.status === 'booked' ? html`<form method="post" action="/driver/parcels/${p.id}/collected" class="row">${csrf(req)}<button class="btn btn-sm">Collected</button></form>` : ''}
+    ${p.status === 'collected' ? html`<form method="post" action="/driver/parcels/${p.id}/delivered" class="row">${csrf(req)}
+      <input name="code" inputmode="numeric" maxlength="4" placeholder="Recipient's code" aria-label="Recipient's 4-digit code" class="short" required><button class="btn btn-sm">Delivered</button></form>` : ''}
+  </article>`;
+
   app.get('/driver', only, async (req, res) => {
     const d = await me(req);
     const now = nowLocal();
     const today = await withMates(await tripsQuery("t.date = ? AND t.status NOT IN ('cancelled') ORDER BY t.pickup_time").all(req.user.id, now.date));
     const r = await driverRating(db, req.user.id);
     const live = today.some(t => ['en_route', 'arrived', 'in_progress'].includes(t.status));
+    const parcels = await driverParcels(db, req.user.id, now.date, now.date);
+    const forecast = await earningsForecast(db, req.user.id, now);
     page(req, res, 'Today', html`
       ${d.status === 'pending' ? html`<div class="card notice"><strong>Verification in progress.</strong> We are checking your ID, licence and PrDP. You will be notified when you can start taking trips.</div>` : ''}
       ${d.status === 'suspended' ? html`<div class="card notice err"><strong>Your account is suspended.</strong> ${d.verification_notes ?? 'Contact Go Rides support.'}</div>` : ''}
@@ -70,19 +84,34 @@ export default function driverRoutes(app, db) {
       <div class="card location" data-location="${live ? 'on' : 'off'}" data-endpoint="/driver/location" data-csrf="${req.csrf}">
         <strong>Live location</strong> <span data-field="loc-status">${live ? 'Sharing with your passenger while a trip is under way.' : 'Shared automatically once you start a trip.'}</span>
       </div>
-      ${today.length ? today.map(t => tripCard(t, { who: who(t), actions: actions(req, t) })) : empty('No trips today.')}`);
+      <a class="card forecast" href="/driver/earnings"><span>Booked for the next 7 days</span><strong>${rand(forecast.amount)}</strong>
+        <small>${forecast.trips} trips${forecast.parcels ? ` and ${forecast.parcels} parcels` : ''}, already on your schedule</small></a>
+      ${today.length ? today.map(t => tripCard(t, { who: who(t), actions: actions(req, t) })) : empty('No trips today.')}
+      ${parcels.length ? html`<h2>Parcels today</h2>${parcels.map(p => parcelCard(req, p))}` : ''}`);
+  });
+
+  app.post('/driver/parcels/:id/collected', only, async (req, res) => {
+    const ok = await collectParcel(db, Number(req.params.id), req.user.id);
+    res.redirect(ok ? '/driver?ok=Parcel collected.' : '/driver?err=That parcel cannot be collected now.');
+  });
+
+  app.post('/driver/parcels/:id/delivered', only, async (req, res) => {
+    const out = await deliverParcel(db, Number(req.params.id), req.user.id, req.body.code);
+    res.redirect(out.ok ? '/driver?ok=Parcel delivered. Thank you!' : `/driver?err=${encodeURIComponent(out.error)}`);
   });
 
   app.get('/driver/trips', only, async (req, res) => {
     const now = nowLocal();
     const upcoming = await withMates(await tripsQuery("t.date > ? AND t.date <= ? AND t.status = 'scheduled' ORDER BY t.date, t.pickup_time").all(req.user.id, now.date, addDays(now.date, 14)));
     const past = await tripsQuery("t.date < ? ORDER BY t.date DESC, t.pickup_time DESC LIMIT 40").all(req.user.id, now.date);
+    const parcels = (await driverParcels(db, req.user.id, now.date, addDays(now.date, 14))).filter(p => p.status !== 'delivered');
     const passengers = await db.prepare(`SELECT u.name, u.phone, p.home_address, p.work_address, COUNT(*) AS n FROM trips t
       JOIN users u ON u.id = t.passenger_id JOIN passengers p ON p.user_id = t.passenger_id
       WHERE t.driver_id = ? AND t.date >= ? AND t.status = 'scheduled' GROUP BY t.passenger_id ORDER BY u.name`).all(req.user.id, now.date);
     page(req, res, 'Trips', html`
       <h1>Your passengers</h1>
       ${passengers.length ? html`<table class="table"><tbody>${passengers.map(p => html`<tr><td><strong>${p.name}</strong><br><a href="tel:${p.phone}">${p.phone}</a></td><td>${p.home_address} → ${p.work_address}</td><td class="num">${p.n} trips</td></tr>`)}</tbody></table>` : empty('No booked passengers yet.')}
+      ${parcels.length ? html`<h2>Parcels on your runs</h2>${parcels.map(p => parcelCard(req, p))}` : ''}
       <h2>Next two weeks</h2>
       ${upcoming.length ? upcoming.map(t => tripCard(t, { who: who(t) })) : empty('Nothing booked yet.')}
       <h2>Recent</h2>
@@ -169,10 +198,15 @@ export default function driverRoutes(app, db) {
     const reviews = await db.prepare('SELECT stars, comment, created_at FROM ratings WHERE ratee_id = ? ORDER BY id DESC LIMIT 10').all(req.user.id);
     const r = await driverRating(db, req.user.id);
     const { commission_pct } = await getSettings(db);
+    const parcelsEarned = (await db.prepare(`SELECT COALESCE(SUM(pa.driver_payout), 0) AS e FROM parcels pa JOIN trips t ON t.id = pa.trip_id
+      WHERE t.driver_id = ? AND pa.status = 'delivered' AND substr(pa.date, 1, 7) = ?`).get(req.user.id, month)).e;
+    const forecast = await earningsForecast(db, req.user.id);
     page(req, res, 'Earnings', html`
       <h1>Earnings</h1>
+      <div class="card forecast"><span>Booked for the next 7 days</span><strong>${rand(forecast.amount)}</strong>
+        <small>${forecast.trips} trips${forecast.parcels ? ` and ${forecast.parcels} parcels` : ''}. Your week is planned before it starts.</small></div>
       <div class="grid-3">
-        <div class="card stat"><span>This month</span><strong>${rand(sum.earned)}</strong></div>
+        <div class="card stat"><span>This month</span><strong>${rand(sum.earned + parcelsEarned)}</strong>${parcelsEarned ? html`<small class="muted">incl. ${rand(parcelsEarned)} from parcels</small>` : ''}</div>
         <div class="card stat"><span>Trips completed</span><strong>${sum.trips}</strong></div>
         <div class="card stat"><span>Rating</span><strong>${r.avg ?? '–'}</strong></div>
       </div>

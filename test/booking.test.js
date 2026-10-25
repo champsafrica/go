@@ -8,6 +8,7 @@ process.env.NODE_ENV = 'test';
 const { openDb, getSettings } = await import('../src/db.js');
 const { hashPassword } = await import('../src/auth.js');
 const booking = await import('../src/booking.js');
+const parcels = await import('../src/parcels.js');
 const { tripFare, planPrice, driverPayout } = await import('../src/pricing.js');
 const { createPayment, markPaid, payfastSignature } = await import('../src/payments.js');
 const { addDays, weekday } = await import('../src/time.js');
@@ -317,4 +318,127 @@ test('leaving a shared car with no other driver free reports it once, not per ri
   const notes = (await db.prepare('SELECT title FROM notifications WHERE user_id = ?').all(b)).map(n => n.title);
   assert.deepEqual(notes.filter(t => t === 'Finding you a driver'), ['Finding you a driver']);
   assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND title = 'Trips moved'").get(thabo)).n, 1);
+});
+
+// ---- On-time Promise ----
+
+test('a pickup at or beyond the promise limit is credited back', async () => {
+  const d = await driver('Thabo');
+  const p = await passenger('Kagiso');
+  await credit(p, 500);
+  await schedule(p, d, '1', '07:00', null);
+  await booking.generateTrips(db, NOW);
+  const [t] = await trips();
+  await db.prepare('UPDATE trips SET delay_minutes = 12 WHERE id = ?').run(t.id);
+  await booking.settleTrip(db, t.id);
+  assert.equal(await booking.walletBalance(db, p), 500, 'charged the fare, then credited it back');
+  assert.equal((await db.prepare('SELECT promise_credit FROM trips WHERE id = ?').get(t.id)).promise_credit, t.fare);
+  assert.ok(await db.prepare("SELECT 1 FROM notifications WHERE user_id = ? AND title = 'On-time Promise'").get(p));
+});
+
+test('a small delay under the limit is not credited', async () => {
+  const d = await driver('Thabo');
+  const p = await passenger('Kagiso');
+  await credit(p, 500);
+  await schedule(p, d, '1', '07:00', null);
+  await booking.generateTrips(db, NOW);
+  const [t] = await trips();
+  await db.prepare('UPDATE trips SET delay_minutes = 5 WHERE id = ?').run(t.id);
+  await booking.settleTrip(db, t.id);
+  assert.equal(await booking.walletBalance(db, p), 500 - t.fare);
+});
+
+test('a ride that never got a driver is cancelled and credited after pickup time', async () => {
+  const p = await passenger('Zanele', { sponsored: 1 });
+  await schedule(p, null, '1', '07:00', null);
+  await booking.generateTrips(db, NOW);
+  assert.equal(await booking.creditMissedTrips(db, { date: MONDAY, time: '06:59' }), 0);
+  assert.equal(await booking.creditMissedTrips(db, { date: MONDAY, time: '07:05' }), 1);
+  const [t] = await trips();
+  assert.equal(t.status, 'cancelled');
+  assert.equal(await booking.walletBalance(db, p), t.fare);
+});
+
+// ---- Go Parcels ----
+
+const parcelForm = (over = {}) => ({ date: MONDAY, from_zone: 'Soweto', to_zone: 'Sandton', pickup_address: 'A', dropoff_address: 'B',
+  recipient_name: 'Rec', recipient_phone: '0820000001', size: 'small', ...over });
+
+let senders = 0;
+async function sender(balance = 500) {
+  const id = await passenger(`Sender${senders++}`, { zone: 'Durban CBD', workZone: 'Umlazi' });
+  await credit(id, balance);
+  return { id, role: 'passenger', business_id: null };
+}
+
+test('a parcel rides on a scheduled run along its route and is paid from the balance', async () => {
+  const d = await driver('Thabo');
+  const rider = await passenger('Zanele', { sponsored: 1 });
+  await schedule(rider, d, '1', '07:00', '17:00');
+  await booking.generateTrips(db, NOW);
+  const s = await sender();
+  const out = await parcels.bookParcel(db, s, parcelForm());
+  assert.ok(out.matched);
+  const morning = (await trips("direction = 'to_work'"))[0];
+  assert.equal(out.parcel.trip_id, morning.id, 'Soweto to Sandton goes on the morning run');
+  assert.equal(await booking.walletBalance(db, s.id), 455);
+  const back = await parcels.bookParcel(db, s, parcelForm({ from_zone: 'Sandton', to_zone: 'Soweto' }));
+  assert.equal(back.parcel.trip_id, (await trips("direction = 'to_home'"))[0].id, 'the reverse goes on the evening run');
+});
+
+test('parcels need enough balance and respect driver capacity', async () => {
+  const d = await driver('Thabo');
+  const rider = await passenger('Zanele', { sponsored: 1 });
+  await schedule(rider, d, '1', '07:00', null);
+  await booking.generateTrips(db, NOW);
+  const poor = await sender(10);
+  assert.match((await parcels.bookParcel(db, poor, parcelForm())).error, /Top up/);
+  const s = await sender(1000);
+  for (let i = 0; i < 3; i++) assert.ok((await parcels.bookParcel(db, s, parcelForm())).matched);
+  assert.equal((await parcels.bookParcel(db, s, parcelForm())).matched, false, 'the fourth waits for room');
+});
+
+test('delivery needs the recipient code', async () => {
+  const d = await driver('Thabo');
+  const rider = await passenger('Zanele', { sponsored: 1 });
+  await schedule(rider, d, '1', '07:00', null);
+  await booking.generateTrips(db, NOW);
+  const { parcel } = await parcels.bookParcel(db, await sender(), parcelForm());
+  assert.equal((await parcels.deliverParcel(db, parcel.id, d, parcel.code)).error !== undefined, true, 'must be collected first');
+  assert.ok(await parcels.collectParcel(db, parcel.id, d));
+  assert.match((await parcels.deliverParcel(db, parcel.id, d, '0000')).error, /code/);
+  assert.ok((await parcels.deliverParcel(db, parcel.id, d, parcel.code)).ok);
+});
+
+test('a parcel moves to another run if its run is cancelled, and is refunded if none is left', async () => {
+  const d = await driver('Thabo');
+  const a = await passenger('A', { sponsored: 1 });
+  const b = await passenger('B', { sponsored: 1 });
+  await schedule(a, d, '1', '07:00', null);
+  await schedule(b, d, '1', '08:30', null);
+  await booking.generateTrips(db, NOW);
+  const s = await sender();
+  const { parcel } = await parcels.bookParcel(db, s, parcelForm());
+  await db.prepare("UPDATE trips SET status = 'cancelled' WHERE id = ?").run(parcel.trip_id);
+  await parcels.runParcels(db, NOW);
+  const moved = await db.prepare('SELECT * FROM parcels WHERE id = ?').get(parcel.id);
+  assert.equal(moved.status, 'booked');
+  assert.notEqual(moved.trip_id, parcel.trip_id);
+  await db.prepare("UPDATE trips SET status = 'cancelled'").run();
+  await parcels.runParcels(db, { date: addDays(MONDAY, 1), time: '06:00' });
+  assert.equal((await db.prepare('SELECT status FROM parcels WHERE id = ?').get(parcel.id)).status, 'cancelled');
+  assert.equal(await booking.walletBalance(db, s.id), 500, 'refunded');
+});
+
+test('drivers see booked trips and parcels in their earnings forecast', async () => {
+  const d = await driver('Thabo');
+  const rider = await passenger('Zanele', { sponsored: 1 });
+  await schedule(rider, d, '1', '07:00', '17:00');
+  await booking.generateTrips(db, NOW);
+  await parcels.bookParcel(db, await sender(), parcelForm());
+  const f = await booking.earningsForecast(db, d, NOW);
+  const payouts = (await trips()).reduce((sum, t) => sum + t.driver_payout, 0);
+  assert.equal(f.trips, 2);
+  assert.equal(f.parcels, 1);
+  assert.equal(f.amount, Math.round((payouts + 36) * 100) / 100, 'R45 parcel pays the driver R36');
 });

@@ -1,6 +1,7 @@
 import { html } from '../views/html.js';
 import { layout, csrf, field, statusPill, stars, empty, STATUS_LABEL } from '../views/layout.js';
 import { requireRole } from '../auth.js';
+import { parcelPill } from './parcels.js';
 import { getSettings, DEFAULT_SETTINGS, tx } from '../db.js';
 import { walletBalance, activeSubscription, driverRating, driverCanTake, assign, describeDriver, tripPool } from '../booking.js';
 import { notify } from '../notify.js';
@@ -15,7 +16,12 @@ const SETTING_LABELS = {
   reminder_minutes: ['Pickup reminder (minutes before)', ''],
   booking_horizon_days: ['Book recurring trips this many days ahead', ''],
   shared_discount_pct: ['Shared-ride discount (%)', 'Off the solo fare for passengers who share'],
-  pool_window_minutes: ['Shared pickups up to this many minutes apart', 'Wider fills more cars but means longer waits']
+  pool_window_minutes: ['Shared pickups up to this many minutes apart', 'Wider fills more cars but means longer waits'],
+  promise_minutes: ['On-time Promise: minutes late before ride credit', 'A trip this late is credited back to the passenger'],
+  parcel_small: ['Go Parcels: small parcel (R)', 'Fits on a lap: documents, phones, small boxes'],
+  parcel_medium: ['Go Parcels: medium parcel (R)', 'Fits on a seat: shoe box to backpack'],
+  parcel_large: ['Go Parcels: large parcel (R)', 'Fits in the boot: up to a suitcase'],
+  parcel_capacity: ['Go Parcels: parcels per driver per day', '']
 };
 
 export default function adminRoutes(app, db) {
@@ -31,6 +37,7 @@ export default function adminRoutes(app, db) {
         SUM(status = 'completed') AS completed, SUM(status = 'no_show') AS no_show, SUM(status = 'cancelled') AS cancelled,
         SUM(status = 'completed' AND delay_minutes = 0) AS on_time,
         SUM(status = 'completed' AND shared = 1) AS shared,
+        COALESCE(SUM(promise_credit), 0) AS promise,
         COALESCE(SUM(CASE WHEN status = 'completed' THEN driver_payout END), 0) AS payouts
       FROM trips WHERE substr(date, 1, 7) = ?`, month);
     const revenue = (await one("SELECT COALESCE(SUM(amount), 0) AS r FROM payments WHERE status = 'paid' AND substr(paid_at, 1, 7) = ?", month)).r;
@@ -56,6 +63,8 @@ export default function adminRoutes(app, db) {
     const topDrivers = await db.prepare(`SELECT u.id, u.name, AVG(r.stars) AS avg, COUNT(r.id) AS n FROM ratings r JOIN users u ON u.id = r.ratee_id
       GROUP BY u.id HAVING n >= 1 ORDER BY avg DESC, n DESC LIMIT 5`).all();
     const settled = (m.completed ?? 0) + (m.no_show ?? 0);
+    const parcelStats = await one(`SELECT SUM(status = 'delivered') AS delivered, SUM(status = 'unmatched' AND date >= ?) AS waiting
+      FROM parcels WHERE substr(date, 1, 7) = ? OR status = 'unmatched'`, now.date, month);
     // Shared trips by the same driver, date, direction and hour approximate one car.
     const cars = await one(`SELECT COUNT(*) AS cars, COALESCE(SUM(n), 0) AS riders FROM (SELECT COUNT(*) AS n FROM trips
       WHERE status = 'completed' AND shared = 1 AND substr(date, 1, 7) = ? GROUP BY driver_id, date, direction, substr(pickup_time, 1, 2))`, month);
@@ -80,6 +89,8 @@ export default function adminRoutes(app, db) {
         <div class="card stat"><span>Open complaints</span><strong>${counts.complaints}</strong></div>
         <div class="card stat"><span>Shared trips</span><strong>${pct(m.shared ?? 0, m.completed ?? 0)}</strong></div>
         <div class="card stat"><span>Riders per shared car</span><strong>${cars.cars ? (cars.riders / cars.cars).toFixed(1) : '–'}</strong></div>
+        <div class="card stat"><span>On-time Promise credits</span><strong>${rand(m.promise)}</strong></div>
+        <div class="card stat"><span>Parcels delivered</span><strong>${parcelStats.delivered ?? 0}</strong><small class="muted">${parcelStats.waiting ?? 0} waiting for a run</small></div>
       </div>
       <h2>Trips per day</h2>
       ${days.length ? html`<div class="bars" role="img" aria-label="Trips per day for the last two weeks and the coming week">${days.map(d => html`<div class="bar ${d.date > now.date ? 'future' : ''} ${d.date === now.date ? 'today' : ''}" title="${d.date}: ${d.total} trips, ${d.done} completed">
@@ -231,6 +242,20 @@ export default function adminRoutes(app, db) {
       .run(id, amount, amount > 0 ? 'refund' : 'adjustment', `Go Rides: ${String(req.body.reason).slice(0, 200)}`);
     await notify(db, id, amount > 0 ? 'Credit added' : 'Balance adjusted', `${rand(amount)} applied to your ride balance: ${req.body.reason}`);
     res.redirect('/admin/passengers?ok=Balance updated.');
+  });
+
+  app.get('/admin/parcels', only, async (req, res) => {
+    const rows = await db.prepare(`SELECT pa.*, su.name AS sender_name, du.name AS driver_name, t.pickup_time FROM parcels pa
+      JOIN users su ON su.id = pa.sender_id LEFT JOIN trips t ON t.id = pa.trip_id LEFT JOIN users du ON du.id = t.driver_id
+      ORDER BY pa.status = 'unmatched' DESC, pa.date DESC, pa.id DESC LIMIT 200`).all();
+    page(req, res, 'Parcels', html`
+      <h1>Go Parcels</h1>
+      <p class="muted">Unmatched parcels look for a run on every booking run, and are refunded if their day passes without one. Adding drivers or passengers on a route creates runs.</p>
+      ${rows.length ? html`<div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Route</th><th>Sender</th><th>Recipient</th><th>Driver</th><th>Status</th><th class="num">Price</th></tr></thead><tbody>
+        ${rows.map(p => html`<tr><td>${formatDate(p.date)}${p.pickup_time ? html`<br><small>${p.pickup_time} run</small>` : ''}</td>
+          <td>${p.from_zone} → ${p.to_zone}<br><small>${p.size}</small></td><td>${p.sender_name}</td>
+          <td>${p.recipient_name}<br><small>${p.recipient_phone}</small></td><td>${p.driver_name ?? html`<span class="muted">None yet</span>`}</td>
+          <td>${parcelPill(p.status)}</td><td class="num">${rand(p.price)}</td></tr>`)}</tbody></table></div>` : empty('No parcels yet.')}`);
   });
 
   app.get('/admin/support', only, async (req, res) => {
