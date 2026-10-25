@@ -1,5 +1,9 @@
 # Go Rides
 
+<img src="public/brand/go-rides-logo.png" alt="Go Rides" height="60">
+
+A Go Ads service ([www.goads.co.za](https://www.goads.co.za)).
+
 **Your everyday commute, sorted.** *Your driver. Your schedule. Your ride.*
 
 Go Rides is a subscription-based transport platform for South African commuters. Passengers set up their trips to work and back once, choose a verified regular driver, and pay monthly or from a prepaid ride balance. Go Rides books every ride a week ahead, lines up backup drivers, and sends reminders and updates on WhatsApp, SMS or email.
@@ -87,15 +91,24 @@ All pricing is set by admins under **Pricing** and applies to new bookings. The 
 - Shared rides: 30% off every fare, plan and pack. A 15 km shared trip costs R30, and the Daily Commuter plan for that distance comes to R1,122 a month instead of R1,608.
 - Drivers keep 80% of each fare. For plan trips, the fare is the plan price divided by its trips.
 
+## Brand
+
+Go Rides shares the Go Ads identity from [www.goads.co.za](https://www.goads.co.za):
+
+- **Logo:** `public/brand/go-rides-logo.png` keeps the "Go" (with the map-pin "o") from the Go Ads wordmark, and sets "rides" in Fredoka Bold in the same orange with a white outline. The favicon is the Go Ads pin mark, and the app icons are PNG versions of it.
+- **Colours:** Go Ads orange `#ff4d00`, forest `#072014`, mint `#86ffb4`, ink `#0b0b0c` and cream `#faf7f2`. Buttons use a deeper orange, `#c93d00`, so that white text on them passes WCAG AA contrast; `#ff4d00` behind white text does not.
+- **Fonts:** Bricolage Grotesque for headings and Inter for text, the same as the Go Ads site, self-hosted in `public/fonts/` under the SIL Open Font License.
+
 ## Before going live
 
-1. **Payments.** Add PayFast merchant details to `.env` (see `.env.example`). Until then, checkout is a clearly labelled test page. Plan renewals currently create a payment request each month. For automatic card debits, move to PayFast tokenised subscriptions.
-2. **Messaging.** Add WhatsApp Cloud API, Clickatell (SMS) and Resend (email) keys. Without them, messages are recorded in each user's in-app inbox and marked *simulated*. WhatsApp messages sent outside a 24-hour customer window need Meta-approved templates.
-3. **Driver vetting.** The app records ID, licence and PrDP numbers. Before approving a driver, check the originals and run a criminal record check. Confirm operating licence requirements under the National Land Transport Act with a transport attorney.
-4. **POPIA.** Have the privacy notice, consent wording and data retention reviewed. Location is shared only while a trip is under way.
-5. **Hosting.** Run it on any Node host with a persistent disk for `DATABASE_PATH` (for example a small VPS, Render or Fly.io), behind HTTPS, with `NODE_ENV=production` and `SITE_URL` set. Back up the SQLite file daily. Move to PostgreSQL when you run more than one server.
-6. **Distances and matching.** Passengers enter an estimated distance, and shared rides are matched by home and work area. Add a maps API (such as Google Distance Matrix) to calculate distances from addresses. That would also let sharers be matched by actual detour time instead of area.
-7. **Shared-ride costs.** Sharers pay the shared price even when they ride alone, so watch *Riders per shared car* on the admin overview. At 30% off, a shared car needs more than about 1.4 riders on average before the driver and Go Rides each earn more from it than from a solo ride.
+1. **Web address.** Go Rides uses the Go Ads domain for now: set `SITE_URL=https://www.goads.co.za`. The app's pages sit at the root of whatever address serves it (`/login`, `/passenger` and so on), so it cannot run on the same host as the existing Go Ads website. Serve it from a subdomain such as `rides.goads.co.za`, and link to it from www.goads.co.za. Set `SITE_URL` to whichever address it runs on, because trip-sharing links and PayFast callbacks use it.
+2. **Payments.** Add PayFast merchant details to `.env` (see `.env.example`). Until then, checkout is a clearly labelled test page. Plan renewals currently create a payment request each month. For automatic card debits, move to PayFast tokenised subscriptions.
+3. **Messaging.** Add WhatsApp Cloud API, Clickatell (SMS) and Resend (email) keys. Without them, messages are recorded in each user's in-app inbox and marked *simulated*. WhatsApp messages sent outside a 24-hour customer window need Meta-approved templates.
+4. **Driver vetting.** The app records ID, licence and PrDP numbers. Before approving a driver, check the originals and run a criminal record check. Confirm operating licence requirements under the National Land Transport Act with a transport attorney.
+5. **POPIA.** Have the privacy notice, consent wording and data retention reviewed. Location is shared only while a trip is under way.
+6. **Hosting.** Run it on any Node host with a persistent disk for `DATABASE_PATH` (for example a small VPS, Render or Fly.io), behind HTTPS, with `NODE_ENV=production` and `SITE_URL` set. Back up the SQLite file daily. Move to PostgreSQL when you run more than one server.
+7. **Distances and matching.** Passengers enter an estimated distance, and shared rides are matched by home and work area. Add a maps API (such as Google Distance Matrix) to calculate distances from addresses. That would also let sharers be matched by actual detour time instead of area.
+8. **Shared-ride costs.** Sharers pay the shared price even when they ride alone, so watch *Riders per shared car* on the admin overview. At 30% off, a shared car needs more than about 1.4 riders on average before the driver and Go Rides each earn more from it than from a solo ride.
 
 ## Roadmap
 

@@ -9,7 +9,8 @@ const NAV = {
   business: [['/business', 'Employees'], ['/business/report', 'Report']]
 };
 
-export const logo = html`<span class="logo" aria-label="Go Rides"><span class="logo-mark">go</span><span class="logo-word">rides</span></span>`;
+// The Go mark from the Go Ads logo (www.goads.co.za) with "rides" in place of "ads".
+export const logo = html`<img class="logo" src="/brand/go-rides-logo.png" alt="Go Rides" width="814" height="191">`;
 
 export function layout(req, { title, body, wide = false }) {
   const user = req.user;
@@ -21,10 +22,12 @@ export function layout(req, { title, body, wide = false }) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0b8a43">
+<meta name="theme-color" content="#0b0b0c">
 <title>${title ? `${title} | Go Rides` : 'Go Rides | Your everyday commute, sorted.'}</title>
 <meta name="description" content="Scheduled, subscription-based commuter transport. Your driver. Your schedule. Your ride.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
+<link rel="preload" href="/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/styles.css">
 </head>
@@ -45,7 +48,8 @@ export function layout(req, { title, body, wide = false }) {
   ${err ? html`<p class="flash err" role="alert">${err}</p>` : ''}
   ${body}
 </main>
-<footer class="foot"><div class="wrap">${logo}<p>Your driver. Your schedule. Your ride.</p></div></footer>
+<footer class="foot"><div class="wrap">${logo}<p>Your driver. Your schedule. Your ride.</p>
+  <p>A Go Ads service · <a href="https://www.goads.co.za">www.goads.co.za</a></p></div></footer>
 <script src="/app.js" defer></script>
 </body>
 </html>`;

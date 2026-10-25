@@ -1,1 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="#0b8a43"/><text x="32" y="43" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="30" text-anchor="middle" fill="#fff">go</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle cx="32" cy="32" r="30" fill="#072014" stroke="#86ffb4" stroke-width="4"/><path d="M32 50 21 35.5a13 13 0 1 1 22 0L32 50Z" fill="#86ffb4"/><circle cx="32" cy="27" r="5" fill="#072014"/></svg>
