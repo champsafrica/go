@@ -105,6 +105,13 @@ input[type=checkbox], input[type=radio] { width: auto; min-height: 0; accent-col
 .pill-completed, .pill-in_progress { background: var(--green-soft); color: var(--green-dark); }
 .pill-en_route, .pill-arrived { background: #e0f7f4; color: #00695c; }
 .pill-unassigned, .pill-late, .pill-backup { background: var(--amber-soft); color: var(--amber); }
+.pill-shared { background: #f1e8fd; color: #5b2a9e; }
+.share-promo { background: var(--green-soft); border-color: #bfe3cd; }
+.share-promo h2 { margin-top: 0; }
+.share-price { margin-top: .5rem; padding-top: .5rem; border-top: 1px dashed var(--line); }
+.share-check { align-items: flex-start; background: var(--green-soft); padding: 12px; border-radius: 10px; }
+.share-check input { margin-top: 4px; }
+.mates { margin: 6px 0 0; padding-left: 1.1rem; font-size: .9rem; }
 .pill-cancelled, .pill-no_show { background: #eef0f2; color: var(--muted); }
 .stars { color: #d98a00; font-weight: 700; }
 .map { margin: 10px 0 4px; border-radius: 10px; overflow: hidden; }

@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS passengers (
   home_address TEXT NOT NULL,
   work_address TEXT NOT NULL,
   zone TEXT NOT NULL,
+  work_zone TEXT,
   distance_km REAL NOT NULL,
+  share_rides INTEGER NOT NULL DEFAULT 0,
   emergency_name TEXT,
   emergency_phone TEXT,
   sponsored INTEGER NOT NULL DEFAULT 0
@@ -94,6 +96,7 @@ CREATE TABLE IF NOT EXISTS trips (
   distance_km REAL NOT NULL,
   fare REAL NOT NULL,
   driver_payout REAL NOT NULL,
+  shared INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'scheduled'
     CHECK (status IN ('scheduled','unassigned','en_route','arrived','in_progress','completed','cancelled','no_show')),
   assignment TEXT CHECK (assignment IN ('preferred','backup','manual')),
@@ -216,8 +219,17 @@ export const DEFAULT_SETTINGS = {
   min_fare: '25',           // Rand
   commission_pct: '20',     // platform share of each fare
   reminder_minutes: '30',   // pickup reminder lead time
-  booking_horizon_days: '7' // how far ahead recurring trips are booked
+  booking_horizon_days: '7', // how far ahead recurring trips are booked
+  shared_discount_pct: '30',  // discount for passengers who share their rides
+  pool_window_minutes: '20'   // shared pickups in one car are at most this far apart
 };
+
+// Columns added after the first release. openDb adds any that an older database lacks.
+const MIGRATIONS = [
+  ['passengers', 'work_zone', 'TEXT'],
+  ['passengers', 'share_rides', 'INTEGER NOT NULL DEFAULT 0'],
+  ['trips', 'shared', 'INTEGER NOT NULL DEFAULT 0']
+];
 
 export const DEFAULT_PLANS = [
   ['Daily Commuter', 'Monday to Friday, to work and back. Best value.', 44, 15],
@@ -230,6 +242,11 @@ export function openDb(path = process.env.DATABASE_PATH || './data/go-rides.db')
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  for (const [table, column, type] of MIGRATIONS) {
+    if (!db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`).get(column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
+  }
   const setting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) setting.run(k, v);
   if (!db.prepare('SELECT 1 FROM plans LIMIT 1').get()) {

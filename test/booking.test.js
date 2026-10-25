@@ -25,15 +25,20 @@ function driver(name, zone = 'Soweto', status = 'approved') {
   for (let d = 1; d <= 5; d++) db.prepare("INSERT INTO driver_availability VALUES (?, ?, '05:00', '20:00')").run(id, d);
   return id;
 }
-function passenger(name, { zone = 'Soweto', km = 20, sponsored = 0 } = {}) {
+function passenger(name, { zone = 'Soweto', workZone = 'Sandton', km = 20, sponsored = 0, share = 0 } = {}) {
   const id = user('passenger', name);
-  db.prepare("INSERT INTO passengers (user_id, home_address, work_address, zone, distance_km, sponsored) VALUES (?, 'Home', 'Work', ?, ?, ?)").run(id, zone, km, sponsored);
+  db.prepare("INSERT INTO passengers (user_id, home_address, work_address, zone, work_zone, distance_km, sponsored, share_rides) VALUES (?, 'Home', 'Work', ?, ?, ?, ?, ?)")
+    .run(id, zone, workZone, km, sponsored, share);
   return id;
 }
-function schedule(passengerId, preferred = null, days = '1,2,3,4,5') {
-  return Number(db.prepare("INSERT INTO schedules (passenger_id, weekdays, morning_time, evening_time, preferred_driver_id) VALUES (?, ?, '07:00', '17:00', ?)")
-    .run(passengerId, days, preferred).lastInsertRowid);
+function schedule(passengerId, preferred = null, days = '1,2,3,4,5', morning = '07:00', evening = '17:00') {
+  return Number(db.prepare("INSERT INTO schedules (passenger_id, weekdays, morning_time, evening_time, preferred_driver_id) VALUES (?, ?, ?, ?, ?)")
+    .run(passengerId, days, morning, evening, preferred).lastInsertRowid);
 }
+function setSeats(driverId, seats) {
+  db.prepare('UPDATE drivers SET seats = ? WHERE user_id = ?').run(seats, driverId);
+}
+const mondayRun = () => trips("date = ? AND direction = 'to_work'", MONDAY);
 function credit(userId, amount) {
   db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES (?, ?, 'topup', 'test')").run(userId, amount);
 }
@@ -45,6 +50,8 @@ test('pricing: fare, plan discount and driver share', () => {
   const s = getSettings(db);
   assert.equal(tripFare(20, s), 54);         // R10 + 20 km x R2.20
   assert.equal(tripFare(3, s), 25);          // minimum fare
+  assert.equal(tripFare(20, s, true), 38);   // 30% off when sharing
+  assert.ok(tripFare(3, s, true) < tripFare(3, s), 'short shared trips are cheaper too');
   const plan = { trips_per_month: 44, discount_pct: 15 };
   assert.equal(planPrice(plan, 20, s), Math.round(54 * 44 * 0.85));
   assert.equal(driverPayout(54, s), 43.2);   // 80% to the driver
@@ -190,4 +197,111 @@ test('PayFast signature matches the documented algorithm', () => {
   const sig = payfastSignature({ merchant_id: '10000100', merchant_key: '46f0cd694581a', amount: '100.00', item_name: 'Go Rides: test item' }, 'pass phrase');
   assert.match(sig, /^[0-9a-f]{32}$/);
   assert.notEqual(sig, payfastSignature({ merchant_id: '10000100', merchant_key: '46f0cd694581a', amount: '100.01', item_name: 'Go Rides: test item' }, 'pass phrase'));
+});
+
+test('sharers on the same route and time go in one car, up to its seats', () => {
+  const d = driver('Thabo');
+  driver('Sipho');
+  setSeats(d, 3);
+  const riders = ['A', 'B', 'C', 'D'].map((n, i) => passenger(n, { sponsored: 1, share: 1 }));
+  riders.forEach((p, i) => schedule(p, null, '1', `07:${String(i * 5).padStart(2, '0')}`, null));
+  booking.generateTrips(db, NOW);
+  const run = mondayRun();
+  assert.ok(run.every(t => t.shared === 1));
+  const byDriver = Object.groupBy(run, t => t.driver_id);
+  assert.deepEqual(Object.values(byDriver).map(g => g.length).sort(), [1, 3], 'three in the first car, the fourth in a second');
+  const first = run[0];
+  assert.equal(booking.carMates(db, first).length, 2);
+});
+
+test('sharers are not pooled across different routes or far-apart times', () => {
+  const d = driver('Thabo');
+  setSeats(d, 4);
+  const a = passenger('A', { sponsored: 1, share: 1 });
+  const b = passenger('B', { sponsored: 1, share: 1, workZone: 'Midrand' });
+  const c = passenger('C', { sponsored: 1, share: 1 });
+  schedule(a, null, '1', '07:00', null);
+  schedule(b, null, '1', '07:05', null);   // different work area
+  schedule(c, null, '1', '07:40', null);   // outside the 20-minute pool window
+  booking.generateTrips(db, NOW);
+  const run = mondayRun();
+  assert.equal(run.filter(t => t.driver_id === d).length, 1, 'only one of them fits in the car');
+  assert.equal(run.filter(t => t.status === 'unassigned').length, 2);
+});
+
+test('a solo passenger never shares a car', () => {
+  const d = driver('Thabo');
+  setSeats(d, 4);
+  const sharer = passenger('A', { sponsored: 1, share: 1 });
+  const solo = passenger('B', { sponsored: 1 });
+  schedule(sharer, null, '1', '07:00', null);
+  schedule(solo, null, '1', '07:05', null);
+  booking.generateTrips(db, NOW);
+  const run = mondayRun();
+  assert.equal(run.filter(t => t.driver_id === d).length, 1);
+  assert.equal(run.find(t => t.passenger_id === solo).shared, 0);
+});
+
+test('a preferred driver is kept, and other sharers join their car', () => {
+  const thabo = driver('Thabo');
+  driver('Sipho');
+  setSeats(thabo, 4);
+  const a = passenger('A', { sponsored: 1, share: 1 });
+  const b = passenger('B', { sponsored: 1, share: 1 });
+  schedule(a, thabo, '1', '07:00', null);
+  schedule(b, null, '1', '07:10', null);
+  booking.generateTrips(db, NOW);
+  assert.ok(mondayRun().every(t => t.driver_id === thabo), 'B joins Thabo rather than taking the free driver');
+});
+
+test('sharers without a work area book as solo rides', () => {
+  driver('Thabo');
+  const p = passenger('A', { sponsored: 1, share: 1, workZone: null });
+  schedule(p, null, '1', '07:00', null);
+  booking.generateTrips(db, NOW);
+  assert.equal(mondayRun()[0].shared, 0);
+});
+
+test('turning sharing on reprices upcoming rides; turning it off moves the rider to their own car', () => {
+  const s = getSettings(db);
+  const thabo = driver('Thabo');
+  const sipho = driver('Sipho');
+  setSeats(thabo, 4);
+  const a = passenger('A', { sponsored: 1, share: 1 });
+  const b = passenger('B', { sponsored: 1 });
+  schedule(a, thabo, '1', '07:00', null);
+  schedule(b, null, '1', '07:10', null);
+  booking.generateTrips(db, NOW);
+  assert.equal(mondayRun().find(t => t.passenger_id === b).driver_id, sipho);
+
+  booking.setSharing(db, b, true, NOW);
+  const tb = mondayRun().find(t => t.passenger_id === b);
+  assert.equal(tb.shared, 1);
+  assert.equal(tb.fare, tripFare(20, s, true));
+
+  // Put B in Thabo's car, then B stops sharing: Thabo cannot carry them alone next to A.
+  db.prepare('UPDATE trips SET driver_id = ? WHERE id = ?').run(thabo, tb.id);
+  const r = booking.setSharing(db, b, false, NOW);
+  const after = mondayRun().find(t => t.passenger_id === b);
+  assert.equal(after.shared, 0);
+  assert.equal(after.fare, tripFare(20, s));
+  assert.equal(after.driver_id, sipho);
+  assert.equal(r.moved, 1);
+});
+
+test('leaving a shared car with no other driver free reports it once, not per ride', () => {
+  const thabo = driver('Thabo');
+  setSeats(thabo, 4);
+  const a = passenger('A', { sponsored: 1, share: 1 });
+  const b = passenger('B', { sponsored: 1, share: 1 });
+  schedule(a, thabo);
+  schedule(b, thabo, '1,2,3,4,5', '07:10', '17:10');
+  booking.generateTrips(db, NOW);
+  assert.ok(trips('passenger_id = ?', b).every(t => t.driver_id === thabo));
+  const r = booking.setSharing(db, b, false, NOW);
+  assert.equal(r.unassigned, 10);
+  assert.ok(trips('passenger_id = ?', b).every(t => t.status === 'unassigned'));
+  const notes = db.prepare('SELECT title FROM notifications WHERE user_id = ?').all(b).map(n => n.title);
+  assert.deepEqual(notes.filter(t => t === 'Finding you a driver'), ['Finding you a driver']);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND title = 'Trips moved'").get(thabo).n, 1);
 });

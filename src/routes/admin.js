@@ -2,7 +2,7 @@ import { html } from '../views/html.js';
 import { layout, csrf, field, statusPill, stars, empty, STATUS_LABEL } from '../views/layout.js';
 import { requireRole } from '../auth.js';
 import { getSettings, DEFAULT_SETTINGS, tx } from '../db.js';
-import { walletBalance, activeSubscription, driverRating, driverCanTake, assign, describeDriver } from '../booking.js';
+import { walletBalance, activeSubscription, driverRating, driverCanTake, assign, describeDriver, tripPool } from '../booking.js';
 import { notify } from '../notify.js';
 import { rand, round2 } from '../pricing.js';
 import { nowLocal, addDays, formatDate } from '../time.js';
@@ -13,7 +13,9 @@ const SETTING_LABELS = {
   min_fare: ['Minimum fare (R)', ''],
   commission_pct: ['Platform commission (%)', 'Share of each fare Go Rides keeps; drivers get the rest'],
   reminder_minutes: ['Pickup reminder (minutes before)', ''],
-  booking_horizon_days: ['Book recurring trips this many days ahead', '']
+  booking_horizon_days: ['Book recurring trips this many days ahead', ''],
+  shared_discount_pct: ['Shared-ride discount (%)', 'Off the solo fare for passengers who share'],
+  pool_window_minutes: ['Shared pickups up to this many minutes apart', 'Wider fills more cars but means longer waits']
 };
 
 export default function adminRoutes(app, db) {
@@ -28,6 +30,7 @@ export default function adminRoutes(app, db) {
     const m = one(`SELECT
         SUM(status = 'completed') AS completed, SUM(status = 'no_show') AS no_show, SUM(status = 'cancelled') AS cancelled,
         SUM(status = 'completed' AND delay_minutes = 0) AS on_time,
+        SUM(status = 'completed' AND shared = 1) AS shared,
         COALESCE(SUM(CASE WHEN status = 'completed' THEN driver_payout END), 0) AS payouts
       FROM trips WHERE substr(date, 1, 7) = ?`, month);
     const revenue = one("SELECT COALESCE(SUM(amount), 0) AS r FROM payments WHERE status = 'paid' AND substr(paid_at, 1, 7) = ?", month).r;
@@ -45,6 +48,7 @@ export default function adminRoutes(app, db) {
     const maxDay = Math.max(1, ...days.map(d => d.total));
     // Morning demand per zone against drivers based there: where to recruit next.
     const demand = db.prepare(`SELECT p.zone, COUNT(DISTINCT p.user_id) AS passengers,
+        COUNT(DISTINCT CASE WHEN p.share_rides = 1 AND p.work_zone IS NOT NULL THEN p.user_id END) AS sharers,
         (SELECT COUNT(*) FROM drivers d WHERE d.zone = p.zone AND d.status = 'approved') AS drivers,
         GROUP_CONCAT(DISTINCT substr(s.morning_time, 1, 2) || ':00') AS hours
       FROM schedules s JOIN passengers p ON p.user_id = s.passenger_id WHERE s.active = 1
@@ -52,6 +56,9 @@ export default function adminRoutes(app, db) {
     const topDrivers = db.prepare(`SELECT u.id, u.name, AVG(r.stars) AS avg, COUNT(r.id) AS n FROM ratings r JOIN users u ON u.id = r.ratee_id
       GROUP BY u.id HAVING n >= 1 ORDER BY avg DESC, n DESC LIMIT 5`).all();
     const settled = (m.completed ?? 0) + (m.no_show ?? 0);
+    // Shared trips by the same driver, date, direction and hour approximate one car.
+    const cars = one(`SELECT COUNT(*) AS cars, COALESCE(SUM(n), 0) AS riders FROM (SELECT COUNT(*) AS n FROM trips
+      WHERE status = 'completed' AND shared = 1 AND substr(date, 1, 7) = ? GROUP BY driver_id, date, direction, substr(pickup_time, 1, 2))`, month);
     const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '–');
     page(req, res, 'Overview', html`
       <div class="row-between"><h1>Operations</h1>
@@ -71,14 +78,16 @@ export default function adminRoutes(app, db) {
         <div class="card stat"><span>Active plans</span><strong>${counts.subs}</strong></div>
         <div class="card stat"><span>Passengers / drivers</span><strong>${counts.passengers} / ${counts.drivers}</strong></div>
         <div class="card stat"><span>Open complaints</span><strong>${counts.complaints}</strong></div>
+        <div class="card stat"><span>Shared trips</span><strong>${pct(m.shared ?? 0, m.completed ?? 0)}</strong></div>
+        <div class="card stat"><span>Riders per shared car</span><strong>${cars.cars ? (cars.riders / cars.cars).toFixed(1) : '–'}</strong></div>
       </div>
       <h2>Trips per day</h2>
       ${days.length ? html`<div class="bars" role="img" aria-label="Trips per day for the last two weeks and the coming week">${days.map(d => html`<div class="bar ${d.date > now.date ? 'future' : ''} ${d.date === now.date ? 'today' : ''}" title="${d.date}: ${d.total} trips, ${d.done} completed">
         <span style="height:${Math.round(d.total / maxDay * 100)}%"></span><small>${d.date.slice(8)}</small></div>`)}</div>` : empty('No trips yet.')}
       <div class="grid-2">
         <div><h2>Demand by area</h2>
-          ${demand.length ? html`<table class="table"><thead><tr><th>Area</th><th class="num">Passengers</th><th class="num">Drivers</th><th>Morning pickups</th></tr></thead><tbody>
-            ${demand.map(d => html`<tr class="${d.drivers === 0 || d.passengers / d.drivers > 3 ? 'warn' : ''}"><td>${d.zone}</td><td class="num">${d.passengers}</td><td class="num">${d.drivers}</td><td>${d.hours ?? ''}</td></tr>`)}</tbody></table>
+          ${demand.length ? html`<table class="table"><thead><tr><th>Area</th><th class="num">Passengers</th><th class="num">Sharing</th><th class="num">Drivers</th><th>Morning pickups</th></tr></thead><tbody>
+            ${demand.map(d => html`<tr class="${d.drivers === 0 || d.passengers / d.drivers > 3 ? 'warn' : ''}"><td>${d.zone}</td><td class="num">${d.passengers}</td><td class="num">${d.sharers}</td><td class="num">${d.drivers}</td><td>${d.hours ?? ''}</td></tr>`)}</tbody></table>
             <p class="muted">Highlighted areas have no local driver, or more than three passengers per driver. Recruit drivers there next.</p>` : empty('No schedules yet.')}</div>
         <div><h2>Top rated drivers</h2>
           ${topDrivers.length ? html`<table class="table"><tbody>${topDrivers.map(d => html`<tr><td>${d.name}</td><td>${stars(Math.round(d.avg * 10) / 10)}</td><td class="num muted">${d.n}</td></tr>`)}</tbody></table>` : empty('No ratings yet.')}</div>
@@ -113,11 +122,11 @@ export default function adminRoutes(app, db) {
           <td>${t.passenger_name}<br><a href="tel:${t.passenger_phone}">${t.passenger_phone}</a></td>
           <td>${t.origin}<br>→ ${t.destination}</td>
           <td>${t.driver_name ?? html`<span class="muted">None</span>`}${t.assignment === 'backup' ? html`<br><small class="muted">backup</small>` : ''}</td>
-          <td>${statusPill(t.status)}${t.delay_minutes ? html`<br><small>${t.delay_minutes} min late</small>` : ''}</td>
+          <td>${statusPill(t.status)}${t.shared ? html` <span class="pill pill-shared">Shared</span>` : ''}${t.delay_minutes ? html`<br><small>${t.delay_minutes} min late</small>` : ''}</td>
           <td class="num">${rand(t.fare)}</td>
           <td>${['scheduled', 'unassigned'].includes(t.status) ? html`
             <form method="post" action="/admin/trips/${t.id}/assign" class="inline">${csrf(req)}
-              <select name="driver_id" aria-label="Driver">${drivers.map(d => html`<option value="${d.user_id}" ${d.user_id === t.driver_id ? 'selected' : ''}>${d.name} (${d.zone})${driverCanTake(db, d.user_id, t.date, t.pickup_time, t.id) ? '' : ' – busy'}</option>`)}</select>
+              <select name="driver_id" aria-label="Driver">${drivers.map(d => html`<option value="${d.user_id}" ${d.user_id === t.driver_id ? 'selected' : ''}>${d.name} (${d.zone})${driverCanTake(db, d.user_id, t.date, t.pickup_time, t.id, tripPool(db, t)) ? '' : ' – busy'}</option>`)}</select>
               <button class="btn btn-sm">Assign</button></form>
             <form method="post" action="/admin/trips/${t.id}/cancel" class="inline">${csrf(req)}<button class="link danger" data-confirm="Cancel this trip?">Cancel</button></form>` : ''}</td>
         </tr>`)}</tbody></table></div>` : empty('No trips match.')}`);

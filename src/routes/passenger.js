@@ -3,12 +3,12 @@ import { layout, csrf, field, tripCard, stars, empty, statusPill } from '../view
 import { requireRole } from '../auth.js';
 import { getSettings, tx } from '../db.js';
 import { tripFare, planPrice, packPrice, RIDE_PACKS, rand } from '../pricing.js';
-import { walletBalance, activeSubscription, driverRating, describeDriver, driverCanTake } from '../booking.js';
+import { walletBalance, activeSubscription, driverRating, describeDriver, driverCanTake, tripPool, carMates, setSharing } from '../booking.js';
 import { createPayment } from '../payments.js';
 import { notify, notifyAdmins, sendDirect } from '../notify.js';
 import { nowLocal, addDays, addMonths, WEEKDAYS, formatDate } from '../time.js';
 import { COMPLAINT_CATEGORIES, CHANNELS, ZONES } from '../config.js';
-import { zoneSelect, channelBoxes, list } from './public.js';
+import { zoneSelect, channelBoxes, shareBox, list } from './public.js';
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -21,6 +21,20 @@ export default function passengerRoutes(app, db) {
       (SELECT COUNT(*) FROM trips WHERE driver_id = d.user_id AND status = 'completed') AS trips_done
     FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.status = 'approved'
     ORDER BY (d.zone = ?) DESC, u.name`).all(zone);
+
+  const sharing = p => Boolean(p.share_rides && p.work_zone);
+
+  const sharingCard = (req, p) => {
+    const { shared_discount_pct: pct } = getSettings(db);
+    return html`<div class="card ${sharing(p) ? '' : 'share-promo'}"><h3>Shared rides: ${sharing(p) ? 'on' : 'off'}</h3>
+      ${sharing(p)
+        ? html`<p>You pay ${pct}% less. We match you with neighbours from ${p.zone} who work in ${p.work_zone} and leave at about the same time. You still keep your own pickup time.</p>`
+        : html`<p>Save ${pct}% on every ride by sharing the car with neighbours who work in the same area. You pay the shared price even on days when nobody joins you.</p>`}
+      ${!p.work_zone ? html`<p><a href="/passenger/profile">Add your work area</a> to start sharing.</p>` : html`
+      <form method="post" action="/passenger/sharing">${csrf(req)}<input type="hidden" name="share_rides" value="${sharing(p) ? '' : '1'}">
+        <button class="btn btn-sm ${sharing(p) ? 'btn-ghost' : ''}" ${sharing(p) ? html`data-confirm="Stop sharing? Rides already booked in a shared car may move to another driver."` : ''}>${sharing(p) ? 'Stop sharing' : `Share my rides and save ${pct}%`}</button></form>`}
+    </div>`;
+  };
 
   const driverWho = t => t.driver_id
     ? html`<p class="who">${t.driver_name} · ${t.vehicle_colour ?? ''} ${t.vehicle} <strong>${t.vehicle_reg}</strong>${t.assignment === 'backup' ? html` <span class="pill pill-backup">Backup driver</span>` : ''}</p>`
@@ -53,7 +67,8 @@ export default function passengerRoutes(app, db) {
           ? html`<p><strong>${sub.plan_name}</strong></p><p>${sub.trips_used} of ${sub.trips_included} trips used. Renews ${formatDate(addDays(sub.period_end, 1))}.</p>`
           : html`<p>No active plan.</p>`}<a href="/passenger/billing">Plans & payments</a></div>
         <div class="card"><h3>Ride balance</h3><p class="price">${rand(balance)}</p><p class="muted">Used for trips beyond your plan.</p><a href="/passenger/billing#packs">Buy a ride pack</a></div>
-      </div>`);
+      </div>
+      ${sharingCard(req, p)}`);
   });
 
   // Schedules
@@ -71,6 +86,7 @@ export default function passengerRoutes(app, db) {
         <p class="muted">Preferred driver: ${s.driver_name ?? 'any verified driver'}</p>
         <form method="post" action="/passenger/schedule/${s.id}/delete">${csrf(req)}<button class="link danger" data-confirm="Stop this schedule and cancel its upcoming rides?">Stop this schedule</button></form>
       </article>`)}
+      ${sharingCard(req, p)}
       <h2>${schedules.length ? 'Add another schedule' : 'Set up your schedule'}</h2>
       <form method="post" action="/passenger/schedule" class="form card">${csrf(req)}
         <fieldset class="field"><legend>Days</legend><div class="checks">${WEEKDAYS.map((d, i) => html`<label class="check"><input type="checkbox" name="weekdays" value="${i + 1}" ${i < 5 ? 'checked' : ''}> ${d}</label>`)}</div></fieldset>
@@ -144,11 +160,11 @@ export default function passengerRoutes(app, db) {
     if (!updated) return res.redirect('/passenger/schedule?err=Set up your schedule first, then choose your driver.');
     // Move upcoming trips to the new driver where they are free.
     const now = nowLocal();
-    const trips = db.prepare(`SELECT id, date, pickup_time FROM trips WHERE passenger_id = ? AND status IN ('scheduled','unassigned')
+    const trips = db.prepare(`SELECT id, passenger_id, date, pickup_time, direction, shared FROM trips WHERE passenger_id = ? AND status IN ('scheduled','unassigned')
       AND (driver_id IS NULL OR driver_id != ?) AND (date > ? OR (date = ? AND pickup_time > ?))`).all(req.user.id, driverId, now.date, now.date, now.time);
     let moved = 0;
     for (const t of trips) {
-      if (!driverCanTake(db, driverId, t.date, t.pickup_time, t.id)) continue;
+      if (!driverCanTake(db, driverId, t.date, t.pickup_time, t.id, tripPool(db, t))) continue;
       db.prepare("UPDATE trips SET driver_id = ?, assignment = 'preferred', status = 'scheduled', reminder_sent = 0 WHERE id = ?").run(driverId, t.id);
       moved++;
     }
@@ -196,6 +212,12 @@ export default function passengerRoutes(app, db) {
         <p data-field="status">${statusPill(t.status)}</p>
         ${t.delay_minutes ? html`<p class="pill pill-late">Running ${t.delay_minutes} min late</p>` : ''}
         ${driverWho(t)}
+        ${t.shared ? (() => {
+          const mates = carMates(db, t);
+          return mates.length
+            ? html`<p class="who"><span class="pill pill-shared">Shared</span> With ${mates.map(m => m.name.split(' ')[0]).join(', ')} · ${mates.length + 1} passengers, pickups ${[t, ...mates].map(m => m.pickup_time).sort().join(', ')}</p>`
+            : html`<p class="who"><span class="pill pill-shared">Shared</span> <span class="muted">Shared-ride price. Nobody else is booked in this car yet.</span></p>`;
+        })() : ''}
         ${t.driver_phone && live ? html`<p><a class="btn btn-sm btn-ghost" href="tel:${t.driver_phone}">Call driver</a></p>` : ''}
         ${live ? html`<div class="map" data-field="map"></div><p class="muted" data-field="updated"></p>` : ''}
         <p class="muted">Fare ${rand(t.fare)}${t.payment_source ? ` · paid by ${t.payment_source}` : ''}</p>
@@ -261,6 +283,18 @@ export default function passengerRoutes(app, db) {
     res.redirect(`/passenger/trips/${t.id}?ok=${encodeURIComponent('Alert sent. Our team is contacting you now. In immediate danger call 10111.')}`);
   });
 
+  app.post('/passenger/sharing', only, (req, res) => {
+    const p = me(req);
+    if (req.body.share_rides && !p.work_zone) return res.redirect('/passenger/profile?err=Add your work area to start sharing.');
+    const r = setSharing(db, req.user.id, Boolean(req.body.share_rides));
+    const { shared_discount_pct: pct } = getSettings(db);
+    const msg = r.shared
+      ? `Shared rides are on. Your ${r.trips} upcoming rides are now ${pct}% cheaper, and we will match you with neighbours from your next bookings.`
+      : `Shared rides are off. Your upcoming rides are back to the solo price${r.moved ? `, and ${r.moved} moved to a driver who can take you alone` : ''}. Plans you have already paid for keep their price.`;
+    const waiting = r.unassigned ? ` ${r.unassigned} rides need a new driver; we will confirm as soon as one is free.` : '';
+    res.redirect(`/passenger?${r.unassigned ? 'err' : 'ok'}=${encodeURIComponent(msg + waiting)}`);
+  });
+
   // Plans, ride packs and payments
   app.get('/passenger/billing', only, (req, res) => {
     const s = getSettings(db);
@@ -272,7 +306,8 @@ export default function passengerRoutes(app, db) {
     const pending = db.prepare("SELECT * FROM payments WHERE user_id = ? AND status = 'pending' ORDER BY id DESC").all(req.user.id);
     const ledger = db.prepare('SELECT * FROM wallet_transactions WHERE user_id = ? ORDER BY id DESC LIMIT 20').all(req.user.id);
     const paid = db.prepare("SELECT * FROM payments WHERE user_id = ? AND status = 'paid' ORDER BY id DESC LIMIT 12").all(req.user.id);
-    const fare = tripFare(p.distance_km, s);
+    const shared = sharing(p);
+    const fare = tripFare(p.distance_km, s, shared);
     page(req, res, 'Plans & payments', html`
       <h1>Plans & payments</h1>
       ${p.sponsored ? html`<div class="card notice">Your employer pays for your rides. You can still buy a ride pack for extra trips.</div>` : ''}
@@ -283,15 +318,16 @@ export default function passengerRoutes(app, db) {
         <form method="post" action="/passenger/subscription/${sub.id}/auto-renew">${csrf(req)}<button class="link">${sub.auto_renew ? 'Turn off auto-renew' : 'Turn on auto-renew'}</button></form></div>` : ''}
       ${upcomingSub ? html`<p class="muted">Next plan (${upcomingSub.plan_name}) starts ${formatDate(upcomingSub.period_start)}.</p>` : ''}
       <h2>Monthly plans</h2>
-      <p class="muted">Priced for your ${p.distance_km} km route. Pay-as-you-go is ${rand(fare)} per trip.</p>
+      <p class="muted">Priced for your ${p.distance_km} km route${shared ? html`, <strong>including your ${s.shared_discount_pct}% shared-ride discount</strong>` : ''}. Pay-as-you-go is ${rand(fare)} per trip.</p>
+      ${shared || !plans.length ? '' : html`<p class="muted">Sharing your rides would bring the ${plans[0].name} plan to ${rand(planPrice(plans[0], p.distance_km, s, true))}. <a href="/passenger/schedule">Find out more</a></p>`}
       <div class="grid-3">${plans.map(pl => html`<div class="card plan"><h3>${pl.name}</h3>
-        <p class="price">${rand(planPrice(pl, p.distance_km, s))}<small>/month</small></p>
+        <p class="price">${rand(planPrice(pl, p.distance_km, s, shared))}<small>/month</small></p>
         <p>${pl.trips_per_month} trips · save ${pl.discount_pct}%</p><p class="muted">${pl.description}</p>
         <form method="post" action="/passenger/subscribe">${csrf(req)}<input type="hidden" name="plan_id" value="${pl.id}"><button class="btn btn-sm">${sub ? 'Choose for next month' : 'Subscribe'}</button></form></div>`)}</div>
       <h2 id="packs">Prepaid ride packs</h2>
       <p class="muted">Credit for trips outside a plan. Your balance: <strong>${rand(walletBalance(db, req.user.id))}</strong></p>
       <div class="grid-3">${RIDE_PACKS.map(pk => html`<div class="card plan"><h3>${pk.rides} rides</h3>
-        <p class="price">${rand(packPrice(pk, p.distance_km, s))}</p>${pk.discount_pct ? html`<p>Save ${pk.discount_pct}%</p>` : html`<p>&nbsp;</p>`}
+        <p class="price">${rand(packPrice(pk, p.distance_km, s, shared))}</p>${pk.discount_pct ? html`<p>Save ${pk.discount_pct}%</p>` : html`<p>&nbsp;</p>`}
         <form method="post" action="/passenger/topup">${csrf(req)}<input type="hidden" name="rides" value="${pk.rides}"><button class="btn btn-sm btn-ghost">Buy</button></form></div>`)}</div>
       <h2>Balance history</h2>
       ${ledger.length ? html`<table class="table"><tbody>${ledger.map(l => html`<tr><td>${l.created_at.slice(0, 10)}</td><td>${l.description}</td><td class="num ${l.amount < 0 ? 'neg' : ''}">${rand(l.amount)}</td></tr>`)}</tbody></table>` : empty('No balance activity yet.')}
@@ -308,7 +344,7 @@ export default function passengerRoutes(app, db) {
     // A new plan starts the day after any current plan ends, so nobody pays twice for the same days.
     const current = db.prepare("SELECT MAX(period_end) AS end FROM subscriptions WHERE passenger_id = ? AND status = 'active' AND period_end >= ?").get(req.user.id, today).end;
     const start = current ? addDays(current, 1) : today;
-    const price = planPrice(plan, p.distance_km, s);
+    const price = planPrice(plan, p.distance_km, s, sharing(p));
     const paymentId = tx(db, () => {
       db.prepare("DELETE FROM payments WHERE user_id = ? AND status = 'pending' AND purpose = 'subscription'").run(req.user.id);
       db.prepare("DELETE FROM subscriptions WHERE passenger_id = ? AND status = 'pending'").run(req.user.id);
@@ -327,7 +363,8 @@ export default function passengerRoutes(app, db) {
   app.post('/passenger/topup', only, (req, res) => {
     const pack = RIDE_PACKS.find(pk => pk.rides === Number(req.body.rides));
     if (!pack) return res.redirect('/passenger/billing?err=Pack not found.');
-    const amount = packPrice(pack, me(req).distance_km, getSettings(db));
+    const p = me(req);
+    const amount = packPrice(pack, p.distance_km, getSettings(db), sharing(p));
     const id = createPayment(db, { userId: req.user.id, amount, purpose: 'topup', item: `${pack.rides}-ride pack` });
     res.redirect(`/payments/${id}/checkout`);
   });
@@ -341,22 +378,26 @@ export default function passengerRoutes(app, db) {
         ${field('Home address (pickup)', html`<input name="home_address" required value="${p.home_address}">`)}
         ${field('Work address', html`<input name="work_address" required value="${p.work_address}">`)}
         ${field('Home area', zoneSelect('zone', p.zone))}
+        ${field('Work area', zoneSelect('work_zone', p.work_zone))}
         ${field('One-way distance (km)', html`<input type="number" name="distance_km" min="1" max="80" step="0.1" required value="${p.distance_km}">`, 'Changing it updates prices for new bookings and plans.')}
         ${field('Emergency contact name', html`<input name="emergency_name" value="${p.emergency_name ?? ''}">`)}
         ${field('Emergency contact number', html`<input type="tel" name="emergency_phone" value="${p.emergency_phone ?? ''}">`)}
+        ${shareBox(sharing(p))}
         ${channelBoxes(req.user.channels)}
         <button class="btn">Save</button></form>`);
   });
 
   app.post('/passenger/profile', only, (req, res) => {
     const b = req.body;
-    if (!ZONES.includes(b.zone) || !b.home_address?.trim() || !b.work_address?.trim()) return res.redirect('/passenger/profile?err=Please complete all fields.');
+    if (!ZONES.includes(b.zone) || !ZONES.includes(b.work_zone) || !b.home_address?.trim() || !b.work_address?.trim()) return res.redirect('/passenger/profile?err=Please complete all fields.');
     const channels = list(b.channels).filter(c => CHANNELS.some(([v]) => v === c)).join(',') || 'email';
     tx(db, () => {
       db.prepare('UPDATE users SET phone = ?, channels = ? WHERE id = ?').run(String(b.phone).trim(), channels, req.user.id);
-      db.prepare('UPDATE passengers SET home_address = ?, work_address = ?, zone = ?, distance_km = ?, emergency_name = ?, emergency_phone = ? WHERE user_id = ?')
-        .run(b.home_address.trim(), b.work_address.trim(), b.zone, Math.min(80, Math.max(1, Number(b.distance_km) || 10)), b.emergency_name || null, b.emergency_phone || null, req.user.id);
+      db.prepare('UPDATE passengers SET home_address = ?, work_address = ?, zone = ?, work_zone = ?, distance_km = ?, emergency_name = ?, emergency_phone = ? WHERE user_id = ?')
+        .run(b.home_address.trim(), b.work_address.trim(), b.zone, b.work_zone, Math.min(80, Math.max(1, Number(b.distance_km) || 10)), b.emergency_name || null, b.emergency_phone || null, req.user.id);
     });
+    // Re-check upcoming rides: a new area or a sharing change can break up a shared car.
+    setSharing(db, req.user.id, Boolean(b.share_rides));
     res.redirect('/passenger/profile?ok=Details saved.');
   });
 }

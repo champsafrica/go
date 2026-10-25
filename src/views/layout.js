@@ -68,7 +68,7 @@ export function tripCard(t, { actions = '', who = '' } = {}) {
     <div class="trip-body">
       <div class="trip-route"><span>${t.origin}</span><span class="arrow" aria-hidden="true">→</span><span>${t.destination}</span></div>
       ${who}
-      <div class="trip-meta">${statusPill(t.status)} ${t.delay_minutes ? html`<span class="pill pill-late">${t.delay_minutes} min late</span>` : ''} <span class="muted">${rand(t.fare)}</span></div>
+      <div class="trip-meta">${statusPill(t.status)} ${t.shared ? html`<span class="pill pill-shared">Shared</span>` : ''} ${t.delay_minutes ? html`<span class="pill pill-late">${t.delay_minutes} min late</span>` : ''} <span class="muted">${rand(t.fare)}</span></div>
       ${actions}
     </div>
   </article>`;

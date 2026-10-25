@@ -42,24 +42,26 @@ export function seed(db) {
     user('business', 'Nomsa Zulu', 'hr@ubuntu.test', '0119990000', businessId);
 
     const passengers = [
-      ['Zanele Mthembu', 'zanele@gorides.test', '0831230001', '12 Vilakazi St, Orlando West, Soweto', '1 Sandton Dr, Sandton', 'Soweto', 24, thabo, null],
-      ['Kagiso Molefe', 'kagiso@gorides.test', '0831230002', '45 Rabie St, Randburg', 'Rosebank Mall, Rosebank', 'Randburg', 11, lindiwe, null],
-      ['Precious Nkosi', 'precious@gorides.test', '0831230003', '8 Chris Hani Rd, Dobsonville, Soweto', '20 Anderson St, Johannesburg CBD', 'Soweto', 18, sipho, businessId]
-    ].map(([name, email, phone, home, work, zone, km, driver, biz]) => {
+      // name, email, phone, home, work, home area, work area, km, driver, employer, shares, morning, evening
+      ['Zanele Mthembu', 'zanele@gorides.test', '0831230001', '12 Vilakazi St, Orlando West, Soweto', '1 Sandton Dr, Sandton', 'Soweto', 'Sandton', 24, thabo, null, 1, '06:30', '17:00'],
+      ['Kagiso Molefe', 'kagiso@gorides.test', '0831230002', '45 Rabie St, Randburg', 'Rosebank Mall, Rosebank', 'Randburg', 'Sandton', 11, lindiwe, null, 0, '07:00', '17:30'],
+      ['Precious Nkosi', 'precious@gorides.test', '0831230003', '8 Chris Hani Rd, Dobsonville, Soweto', '20 Anderson St, Johannesburg CBD', 'Soweto', 'Johannesburg CBD', 18, sipho, businessId, 0, '07:00', '17:30'],
+      ['Bongani Sithole', 'bongani@gorides.test', '0831230004', '30 Klipspruit Valley Rd, Orlando East, Soweto', '5 Rivonia Rd, Sandton', 'Soweto', 'Sandton', 23, thabo, null, 1, '06:40', '17:10']
+    ].map(([name, email, phone, home, work, zone, workZone, km, driver, biz, share, morning, evening]) => {
       const id = user('passenger', name, email, phone, biz);
-      db.prepare(`INSERT INTO passengers (user_id, home_address, work_address, zone, distance_km, emergency_name, emergency_phone, sponsored)
-        VALUES (?, ?, ?, ?, ?, 'Family contact', '0820000000', ?)`).run(id, home, work, zone, km, biz ? 1 : 0);
+      db.prepare(`INSERT INTO passengers (user_id, home_address, work_address, zone, work_zone, distance_km, share_rides, emergency_name, emergency_phone, sponsored)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Family contact', '0820000000', ?)`).run(id, home, work, zone, workZone, km, share, biz ? 1 : 0);
       const schedule = Number(db.prepare("INSERT INTO schedules (passenger_id, weekdays, morning_time, evening_time, preferred_driver_id) VALUES (?, '1,2,3,4,5', ?, ?, ?)")
-        .run(id, driver === thabo ? '06:30' : '07:00', driver === thabo ? '17:00' : '17:30', driver).lastInsertRowid);
-      return { id, km, driver, schedule, home, work };
+        .run(id, morning, evening, driver).lastInsertRowid);
+      return { id, km, driver, schedule, home, work, share, morning, evening };
     });
-    const [zanele, kagiso] = passengers;
+    const [zanele, kagiso, , bongani] = passengers;
     db.prepare('INSERT INTO backup_drivers VALUES (?, ?)').run(zanele.id, sipho);
 
     // Zanele: Daily Commuter plan, paid. Kagiso: prepaid ride balance.
     const plan = db.prepare("SELECT * FROM plans WHERE name = 'Daily Commuter'").get();
     const start = addDays(today, -14);
-    const price = planPrice(plan, zanele.km, s);
+    const price = planPrice(plan, zanele.km, s, true);
     const subId = db.prepare("INSERT INTO subscriptions (passenger_id, plan_id, price, trips_included, period_start, period_end, status) VALUES (?, ?, ?, ?, ?, ?, 'active')")
       .run(zanele.id, plan.id, price, plan.trips_per_month, start, addDays(addMonths(start, 1), -1)).lastInsertRowid;
     db.prepare("INSERT INTO payments (user_id, amount, purpose, subscription_id, item, provider, status, paid_at) VALUES (?, ?, 'subscription', ?, 'Daily Commuter plan', 'simulated', 'paid', ?)")
@@ -67,6 +69,9 @@ export function seed(db) {
     const pack = Math.round(tripFare(kagiso.km, s) * 40 * 0.92);
     db.prepare("INSERT INTO payments (user_id, amount, purpose, item, provider, status, paid_at) VALUES (?, ?, 'topup', '40-ride pack', 'simulated', 'paid', ?)").run(kagiso.id, pack, `${start} 09:00:00`);
     db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, description, created_at) VALUES (?, ?, 'topup', '40-ride pack', ?)").run(kagiso.id, pack, `${start} 09:00:00`);
+    const sharedPack = Math.round(tripFare(bongani.km, s, true) * 40 * 0.92);
+    db.prepare("INSERT INTO payments (user_id, amount, purpose, item, provider, status, paid_at) VALUES (?, ?, 'topup', '40-ride pack', 'simulated', 'paid', ?)").run(bongani.id, sharedPack, `${start} 09:30:00`);
+    db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, description, created_at) VALUES (?, ?, 'topup', '40-ride pack', ?)").run(bongani.id, sharedPack, `${start} 09:30:00`);
 
     // Two weeks of completed history.
     const comments = ['Always on time, thank you!', 'Friendly and safe driver.', 'Clean car.', null, null];
@@ -75,15 +80,15 @@ export function seed(db) {
       const date = addDays(today, -i);
       if (weekday(date) > 5) continue;
       for (const p of passengers) {
-        for (const [dir, time, from, to] of [['to_work', '07:00', p.home, p.work], ['to_home', '17:30', p.work, p.home]]) {
-          const fare = tripFare(p.km, s);
-          const source = p === zanele ? 'subscription' : p === kagiso ? 'wallet' : 'business';
+        for (const [dir, time, from, to] of [['to_work', p.morning, p.home, p.work], ['to_home', p.evening, p.work, p.home]]) {
+          const fare = tripFare(p.km, s, Boolean(p.share));
+          const source = p === zanele ? 'subscription' : p === kagiso || p === bongani ? 'wallet' : 'business';
           const value = source === 'subscription' ? price / plan.trips_per_month : fare;
           const delay = n % 9 === 4 ? 10 : 0;
           const tripId = Number(db.prepare(`INSERT INTO trips (passenger_id, schedule_id, driver_id, date, pickup_time, direction, origin, destination,
-            distance_km, fare, driver_payout, status, assignment, payment_source, delay_minutes, share_token, completed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', 'preferred', ?, ?, ?, ?)`)
-            .run(p.id, p.schedule, p.driver, date, time, dir, from, to, p.km, fare, driverPayout(value, s), source, delay, token(), `${date} ${time}:00`).lastInsertRowid);
+            distance_km, fare, driver_payout, shared, status, assignment, payment_source, delay_minutes, share_token, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', 'preferred', ?, ?, ?, ?)`)
+            .run(p.id, p.schedule, p.driver, date, time, dir, from, to, p.km, fare, driverPayout(value, s), p.share, source, delay, token(), `${date} ${time}:00`).lastInsertRowid);
           if (source === 'subscription') db.prepare('UPDATE subscriptions SET trips_used = trips_used + 1 WHERE id = ?').run(subId);
           if (source === 'wallet') db.prepare("INSERT INTO wallet_transactions (user_id, amount, type, trip_id, description, created_at) VALUES (?, ?, 'trip', ?, ?, ?)")
             .run(p.id, -fare, tripId, `Ride ${date} ${time}`, `${date} 18:00:00`);
@@ -106,8 +111,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   console.log(seed(db)
     ? `Demo data added. Log in with any of these (password "${DEMO_PASSWORD}"):
   admin@gorides.test      operations
-  zanele@gorides.test     passenger on a monthly plan
+  zanele@gorides.test     passenger on a monthly plan, sharing rides
   kagiso@gorides.test     passenger with prepaid rides
+  bongani@gorides.test    passenger sharing Thabo's car with Zanele
   precious@gorides.test   employee paid for by Ubuntu Logistics
   thabo@gorides.test      driver
   hr@ubuntu.test          employer`

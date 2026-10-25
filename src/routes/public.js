@@ -14,6 +14,9 @@ export const zoneSelect = (name, selected) => html`<select name="${name}" requir
 export const channelBoxes = (chosen = 'whatsapp,email') => html`<fieldset class="field"><legend>Send me updates by</legend>
   <div class="checks">${CHANNELS.map(([v, l]) => html`<label class="check"><input type="checkbox" name="channels" value="${v}" ${chosen.split(',').includes(v) ? 'checked' : ''}> ${l}</label>`)}</div></fieldset>`;
 
+export const shareBox = checked => html`<label class="check share-check"><input type="checkbox" name="share_rides" value="1" ${checked ? 'checked' : ''}>
+  <span><strong>Share my rides and pay less.</strong> Neighbours who work in the same area and leave at about the same time may ride with me.</span></label>`;
+
 export const list = v => (Array.isArray(v) ? v : v ? [v] : []);
 
 function landing(req, db) {
@@ -44,9 +47,14 @@ function landing(req, db) {
     </form>
     <div id="prices" class="grid-3">
       ${plans.map(p => html`<div class="card plan"><h3>${p.name}</h3><p class="price">${rand(planPrice(p, km, s))}<small>/month</small></p>
-        <p>${p.trips_per_month} trips. ${p.description}</p><p class="muted">${p.discount_pct}% off pay-as-you-go</p></div>`)}
+        <p>${p.trips_per_month} trips. ${p.description}</p><p class="muted">${p.discount_pct}% off pay-as-you-go</p>
+        <p class="share-price">Share your ride: <strong>${rand(planPrice(p, km, s, true))}</strong>/month</p></div>`)}
     </div>
-    <p class="muted">Pay-as-you-go: ${rand(tripFare(km, s))} per trip from a prepaid ride balance.</p>
+    <p class="muted">Pay-as-you-go: ${rand(tripFare(km, s))} per trip, or ${rand(tripFare(km, s, true))} shared, from a prepaid ride balance.</p>
+  </section>
+  <section class="card share-promo">
+    <h2>Share your ride, save ${s.shared_discount_pct}%</h2>
+    <p>Neighbours who work in the same area and leave at about the same time can ride together. You keep your own pickup time and door-to-door service, and pay ${s.shared_discount_pct}% less, even on days when nobody joins you.</p>
   </section>
   <section class="grid-2">
     <div class="card"><h3>Safety built in</h3><p>Every driver is ID, licence and PrDP checked before their first trip. Share your live trip with family, and reach our team with one tap if something is wrong.</p></div>
@@ -55,7 +63,7 @@ function landing(req, db) {
 }
 
 const REGISTER_FIELDS = {
-  passenger: ['home_address', 'work_address', 'zone', 'distance_km'],
+  passenger: ['home_address', 'work_address', 'zone', 'work_zone', 'distance_km'],
   driver: ['zone', 'vehicle', 'vehicle_reg', 'id_number', 'licence_no'],
   business: ['company']
 };
@@ -79,9 +87,11 @@ function registerPage(req, as, values = {}, error = '') {
         ${field('Home address (pickup)', html`<input name="home_address" required value="${v('home_address')}">`)}
         ${field('Work address', html`<input name="work_address" required value="${v('work_address')}">`)}
         ${field('Home area', zoneSelect('zone', v('zone')))}
+        ${field('Work area', zoneSelect('work_zone', v('work_zone')))}
         ${field('One-way distance (km)', html`<input type="number" name="distance_km" min="1" max="80" step="0.1" required value="${v('distance_km')}">`, 'An estimate is fine. We confirm it before your first trip.')}
         ${field('Emergency contact name', html`<input name="emergency_name" value="${v('emergency_name')}">`)}
         ${field('Emergency contact number', html`<input type="tel" name="emergency_phone" value="${v('emergency_phone')}">`)}
+        ${shareBox(values.share_rides === undefined ? true : Boolean(values.share_rides))}
       ` : ''}
       ${as === 'driver' ? html`
         ${field('Area you drive in', zoneSelect('zone', v('zone')))}
@@ -113,13 +123,14 @@ export default function publicRoutes(app, db) {
   app.post('/register', (req, res) => {
     const b = req.body;
     const as = ['passenger', 'driver', 'business'].includes(b.as) ? b.as : 'passenger';
-    const fail = msg => res.status(400).send(String(registerPage(req, as, { ...b, channels: list(b.channels).join(',') }, msg)));
+    const fail = msg => res.status(400).send(String(registerPage(req, as, { ...b, channels: list(b.channels).join(','), share_rides: b.share_rides ? 1 : 0 }, msg)));
     const email = String(b.email ?? '').trim().toLowerCase();
     for (const k of ['name', 'email', 'phone', 'password', ...REGISTER_FIELDS[as]]) {
       if (!String(b[k] ?? '').trim()) return fail('Please fill in all the required fields.');
     }
     if (String(b.password).length < 8) return fail('Your password needs at least 8 characters.');
     if ((as === 'passenger' || as === 'driver') && !ZONES.includes(b.zone)) return fail('Please choose your area.');
+    if (as === 'passenger' && !ZONES.includes(b.work_zone)) return fail('Please choose your work area.');
     if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return fail('There is already an account with that email. Log in instead.');
     const channels = list(b.channels).filter(c => CHANNELS.some(([v]) => v === c)).join(',') || 'email';
 
@@ -131,9 +142,9 @@ export default function publicRoutes(app, db) {
       const id = Number(db.prepare('INSERT INTO users (role, name, email, phone, password_hash, channels, business_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(as, b.name.trim(), email, b.phone.trim(), hashPassword(b.password), channels, businessId).lastInsertRowid);
       if (as === 'passenger') {
-        db.prepare(`INSERT INTO passengers (user_id, home_address, work_address, zone, distance_km, emergency_name, emergency_phone)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, b.home_address.trim(), b.work_address.trim(), b.zone,
-          Math.min(80, Math.max(1, Number(b.distance_km) || 10)), b.emergency_name || null, b.emergency_phone || null);
+        db.prepare(`INSERT INTO passengers (user_id, home_address, work_address, zone, work_zone, distance_km, share_rides, emergency_name, emergency_phone)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, b.home_address.trim(), b.work_address.trim(), b.zone, b.work_zone,
+          Math.min(80, Math.max(1, Number(b.distance_km) || 10)), b.share_rides ? 1 : 0, b.emergency_name || null, b.emergency_phone || null);
       } else if (as === 'driver') {
         db.prepare(`INSERT INTO drivers (user_id, zone, vehicle, vehicle_reg, vehicle_colour, seats, id_number, licence_no, prdp_no)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, b.zone, b.vehicle.trim(), b.vehicle_reg.trim().toUpperCase(), b.vehicle_colour || null,

@@ -1,7 +1,7 @@
 import { html } from '../views/html.js';
 import { layout, csrf, field, tripCard, stars, empty } from '../views/layout.js';
 import { requireRole } from '../auth.js';
-import { settleTrip, reassignDriverTrips, driverRating } from '../booking.js';
+import { settleTrip, reassignDriverTrips, driverRating, carMates } from '../booking.js';
 import { notify } from '../notify.js';
 import { rand } from '../pricing.js';
 import { nowLocal, addDays, WEEKDAYS, formatDate } from '../time.js';
@@ -31,7 +31,16 @@ export default function driverRoutes(app, db) {
   const tripsQuery = where => db.prepare(`SELECT t.*, u.name AS passenger_name, u.phone AS passenger_phone
     FROM trips t JOIN users u ON u.id = t.passenger_id WHERE t.driver_id = ? AND ${where}`);
 
-  const who = t => html`<p class="who">${t.passenger_name} · <a href="tel:${t.passenger_phone}">${t.passenger_phone}</a> · <a href="https://maps.google.com/?q=${encodeURIComponent(t.origin)}" target="_blank" rel="noopener">Directions</a></p>`;
+  // For a shared car, show where this pickup falls in the run and who else is on it.
+  const carInfo = t => {
+    const mates = t.shared && !['completed', 'cancelled', 'no_show'].includes(t.status) ? carMates(db, t) : [];
+    if (!mates.length) return '';
+    const run = [t, ...mates].sort((a, b) => a.pickup_time.localeCompare(b.pickup_time));
+    return html`<p class="who"><strong>Shared car: pickup ${run.findIndex(r => r.id === t.id) + 1} of ${run.length}</strong></p>
+      <ol class="mates">${run.map(r => html`<li>${r.pickup_time} ${r.id === t.id ? t.passenger_name : r.name} · ${r.id === t.id ? t.origin : r.origin}</li>`)}</ol>`;
+  };
+
+  const who = t => html`<p class="who">${t.passenger_name} · <a href="tel:${t.passenger_phone}">${t.passenger_phone}</a> · <a href="https://maps.google.com/?q=${encodeURIComponent(t.origin)}" target="_blank" rel="noopener">Directions</a></p>${carInfo(t)}`;
 
   const actions = (req, t) => html`<div class="row">
     ${(NEXT[t.status] ?? []).map(([to, label]) => html`<form method="post" action="/driver/trips/${t.id}/status">${csrf(req)}
@@ -159,7 +168,7 @@ export default function driverRoutes(app, db) {
         <div class="card stat"><span>Trips completed</span><strong>${sum.trips}</strong></div>
         <div class="card stat"><span>Rating</span><strong>${r.avg ?? '–'}</strong></div>
       </div>
-      <p class="muted">You keep ${100 - Number(db.prepare("SELECT value FROM settings WHERE key = 'commission_pct'").get().value)}% of each fare. Plan trips pay the plan's per-trip value.</p>
+      <p class="muted">You keep ${100 - Number(db.prepare("SELECT value FROM settings WHERE key = 'commission_pct'").get().value)}% of each fare. Plan trips pay the plan's per-trip value. In a shared car you are paid for every passenger, so a full car earns more than a solo trip.</p>
       <h2>By month</h2>
       ${byMonth.length ? html`<table class="table"><thead><tr><th>Month</th><th class="num">Trips</th><th class="num">Earned</th></tr></thead><tbody>
         ${byMonth.map(m => html`<tr><td>${m.month}</td><td class="num">${m.trips}</td><td class="num">${rand(m.earned)}</td></tr>`)}</tbody></table>` : empty('No completed trips yet.')}

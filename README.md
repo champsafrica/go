@@ -22,7 +22,8 @@ Requires Node 22.5 or newer. The app uses Node's built-in SQLite and Express, an
 | Email | Role |
 | --- | --- |
 | `admin@gorides.test` | Operations admin |
-| `zanele@gorides.test` | Passenger on the Daily Commuter plan |
+| `zanele@gorides.test` | Passenger on the Daily Commuter plan, sharing rides |
+| `bongani@gorides.test` | Passenger sharing Thabo's car with Zanele |
 | `kagiso@gorides.test` | Passenger using a prepaid ride balance |
 | `precious@gorides.test` | Employee whose rides are paid by Ubuntu Logistics |
 | `thabo@gorides.test` | Driver (also `lindiwe@`, `sipho@`; `ayanda@` is waiting for verification) |
@@ -34,6 +35,7 @@ Requires Node 22.5 or newer. The app uses Node's built-in SQLite and Express, an
 | --- | --- |
 | Passenger registration with home, work, area, distance and emergency contact | `/register` |
 | Recurring trips (for example Mon to Fri, 07:00 and 17:00) | Passenger → Schedule |
+| Shared rides: neighbours on the same route share a car and pay less | Passenger → Schedule or Home |
 | Preferred driver and approved backup drivers | Passenger → Drivers |
 | Automatic booking a week ahead, with backup allocation | `src/booking.js` |
 | Monthly plans, prepaid ride packs, renewals and reminders | Passenger → Plans & pay, `src/payments.js` |
@@ -58,6 +60,21 @@ For each booked trip, `pickDriver` tries in order:
 
 A driver qualifies only if they are approved, available at that time on that weekday, not on time off, and have no other trip within 60 minutes. If nobody qualifies, the trip shows as *Finding driver*, admins are alerted, and the next booking run (every five minutes) tries again. When a driver books time off or is suspended, their trips move to backups and passengers are told who is coming instead.
 
+### Shared rides
+
+Passengers can choose to share their rides, at sign-up or later, for a discount on every fare (30% by default). Two sharers can ride in the same car when:
+
+- they live in the same area and work in the same area;
+- they travel in the same direction on the same day;
+- their pickup times are no more than 20 minutes apart (admins can change this);
+- the car has a free seat.
+
+When booking a shared trip, Go Rides keeps the passenger's preferred driver if they are free, or their car still has a matching seat. Otherwise it fills cars that already carry matching sharers, fullest first, before using a new driver. Sharers pay the shared price even when nobody joins them, so the price is predictable. Solo passengers are never placed in a shared car.
+
+The driver sees the order of pickups for each shared car, and each passenger sees the first names of the people they ride with. Drivers are paid their share of every passenger's fare, so a full car earns more than a solo trip. When someone stops sharing, their upcoming rides go back to the solo price. Any ride that can no longer stay in its car moves to another driver, and each person affected gets one message.
+
+The admin overview shows the share of trips that were shared, the average riders per shared car, and how many passengers share in each area.
+
 A passenger is only booked when they can pay for the ride: an active plan, an employer, or enough ride balance for the rides already booked.
 
 ### Pricing
@@ -67,6 +84,7 @@ All pricing is set by admins under **Pricing** and applies to new bookings. The 
 - Fare per trip: R10 + R2.20/km, at least R25. A 15 km trip costs R43.
 - Plans: Daily Commuter (44 trips, 15% off), Part-time (26 trips, 10% off), Flexi (18 trips, 5% off).
 - Ride packs: 10, 20 (5% off) or 40 rides (8% off), credited to a Rand balance.
+- Shared rides: 30% off every fare, plan and pack. A 15 km shared trip costs R30, and the Daily Commuter plan for that distance comes to R1,122 a month instead of R1,608.
 - Drivers keep 80% of each fare. For plan trips, the fare is the plan price divided by its trips.
 
 ## Before going live
@@ -76,11 +94,12 @@ All pricing is set by admins under **Pricing** and applies to new bookings. The 
 3. **Driver vetting.** The app records ID, licence and PrDP numbers. Before approving a driver, check the originals and run a criminal record check. Confirm operating licence requirements under the National Land Transport Act with a transport attorney.
 4. **POPIA.** Have the privacy notice, consent wording and data retention reviewed. Location is shared only while a trip is under way.
 5. **Hosting.** Run it on any Node host with a persistent disk for `DATABASE_PATH` (for example a small VPS, Render or Fly.io), behind HTTPS, with `NODE_ENV=production` and `SITE_URL` set. Back up the SQLite file daily. Move to PostgreSQL when you run more than one server.
-6. **Distances.** Passengers enter an estimated distance. Add a maps API (such as Google Distance Matrix) to calculate it from their addresses.
+6. **Distances and matching.** Passengers enter an estimated distance, and shared rides are matched by home and work area. Add a maps API (such as Google Distance Matrix) to calculate distances from addresses. That would also let sharers be matched by actual detour time instead of area.
+7. **Shared-ride costs.** Sharers pay the shared price even when they ride alone, so watch *Riders per shared car* on the admin overview. At 30% off, a shared car needs more than about 1.4 riders on average before the driver and Go Rides each earn more from it than from a solo ride.
 
 ## Roadmap
 
-- Shared rides: several passengers on one route for a lower price, the main lever on affordability.
+- Shared-ride preferences, such as riding only with women passengers, and matching by detour time once addresses are mapped.
 - Android and iOS apps. The site already installs to the home screen and works on low-end phones.
 - Automatic weekly driver payouts and invoices for employers.
 - Student, shift-worker and airport transfer plans.
